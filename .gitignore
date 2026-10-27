@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.py[cod]
+data/
+diagnostics/
+profile.json
+.env
+.env.*
+*.dpapi
+*.sqlite*
+*.db
+*.log
+dist/

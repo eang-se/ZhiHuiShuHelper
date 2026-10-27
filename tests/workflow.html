@@ -1,0 +1,42 @@
+<!doctype html><meta charset="utf-8"><title>Local workflow verification</title>
+<style>body{font:16px sans-serif;padding:30px}.checkedIcon{background:green}.radio-view li{padding:8px;cursor:pointer}span.next-topic.noNext{color:gray} .action{padding:10px;cursor:pointer;border:1px solid}</style>
+<main id="quiz"></main>
+<section class="line1-left" hidden><div class="charts-label-rate"></div><div><div class="line1-count-total"><div class="line1-count-total-num">2</div></div></div><div class="line1-count-link action">查看作答记录与解析</div></section>
+<section class="exam-preview" hidden><div class="reviews"></div><div class="submit action">重新答题</div></section>
+<script>
+const first={stem:'2 + 2 = ?',kind:'single',options:['3','4'],correct:['4']};
+const reordered={...first,options:['4','3']};
+const multi={stem:'Select prime numbers',kind:'multiple',options:['2','3','4'],correct:['2','3']};
+const text={stem:'Capital of France',kind:'text',options:[],correct:['Paris']};
+let round=1,index=0,answers={},current=[];
+const quiz=document.querySelector('#quiz'),result=document.querySelector('.line1-left'),preview=document.querySelector('.exam-preview');
+function show(){
+ current=round===1?[first,multi]:[reordered,text];
+ const q=current[index];
+ const type={single:'单选题',multiple:'多选题',text:'填空题'}[q.kind];
+ quiz.innerHTML=`<div class="right-H"><span class="reviewDone action">提交作业</span></div>
+ <div class="questionContent"><div class="questionName"><div class="questionTitle"><span class="letterSortNum">${index+1}. ${type}</span></div><div class="centent-pre">${q.stem}</div></div>
+ ${q.options.length?`<ul class="radio-view">${q.options.map((v,i)=>`<li><i class="checkIcon"></i><span>${String.fromCharCode(65+i)}.</span><div class="stem">${v}</div></li>`).join('')}</ul>`:'<textarea></textarea>'}</div>
+ <div class="pre-next"><span class="next-topic ${index===current.length-1?'noNext':''} action">下一题</span></div>`;
+ quiz.querySelectorAll('.radio-view li').forEach((li,i)=>li.onclick=()=>{
+   if(q.kind==='single')quiz.querySelectorAll('.checkIcon').forEach(el=>el.classList.remove('checkedIcon'));
+   li.querySelector('i').classList.toggle('checkedIcon');
+ });
+ quiz.querySelector('.next-topic').onclick=()=>{if(index<current.length-1){save();index++;quiz.innerHTML='';setTimeout(show,100)}};
+ quiz.querySelector('.reviewDone').onclick=()=>{save();quiz.innerHTML='';setTimeout(()=>{result.hidden=false;result.querySelector('.charts-label-rate').textContent=round===1?'75%':'95%'},100)};
+}
+function save(){const q=current[index];answers[q.stem]=q.kind==='text'?[quiz.querySelector('textarea').value]:Array.from(quiz.querySelectorAll('.radio-view li')).flatMap((e,i)=>e.querySelector('.checkedIcon')?[q.options[i]]:[])}
+document.querySelector('.line1-count-link').onclick=()=>{
+ preview.hidden=false;
+ preview.querySelector('.reviews').innerHTML=current.map(q=>{
+   const correct=JSON.stringify([...(answers[q.stem]||[])].sort())===JSON.stringify([...q.correct].sort());
+   const type={single:'单选题',multiple:'多选题',text:'填空题'}[q.kind];
+   const answer=q.kind==='multiple'?q.correct.map(x=>String.fromCharCode(65+q.options.indexOf(x))).join(','):q.correct[0];
+   return `<ul class="question-item" data-blank-count="${q.kind==='text'?1:0}"><div class="quest-type">${type}</div><div class="quest-title"><pre class="option-name">${q.stem}</pre></div>
+   ${q.options.map(v=>`<label class="${q.kind==='multiple'?'el-checkbox':'el-radio'}"><input type="${q.kind==='multiple'?'checkbox':'radio'}" disabled><span class="preStyle">${v}</span></label>`).join('')}
+   <div class="question-result"><p>${correct?'回答正确':'回答错误'}</p></div><div class="analysis"><p class="answer-title">参考答案：${answer}</p></div></ul>`;
+ }).join('');
+};
+document.querySelector('.submit').onclick=()=>{preview.hidden=true;result.hidden=true;round++;index=0;answers={};show()};
+show();
+</script>

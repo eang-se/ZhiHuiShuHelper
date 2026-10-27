@@ -1,0 +1,8 @@
+<!doctype html><meta charset="utf-8"><title>Quiz navigation fixture</title>
+<div class="right-H"><span class="reviewDone">提交作业</span></div>
+<div class="questionContent"><div class="questionName"><div class="questionTitle"><span class="letterSortNum">1. 单选题</span></div><div class="centent-pre">Navigation question</div></div>
+<ul class="radio-view"><li><i></i><div class="stem">Yes</div></li><li><i></i><div class="stem">No</div></li></ul></div>
+<script>
+document.querySelectorAll('li').forEach(li=>li.onclick=()=>{document.querySelectorAll('i').forEach(x=>x.className='');li.querySelector('i').className='checkedIcon'});
+document.querySelector('.reviewDone').onclick=()=>location.href='navigation-result.html'+location.search;
+</script>

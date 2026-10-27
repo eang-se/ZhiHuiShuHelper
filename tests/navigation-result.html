@@ -1,0 +1,6 @@
+<!doctype html><meta charset="utf-8"><title>Result navigation fixture</title>
+<div class="line1-left"><div class="charts-label-rate"></div><div><div class="line1-count-total"><div class="line1-count-total-num">1</div></div></div><div class="line1-count-link">查看作答记录与解析</div></div>
+<script>
+document.querySelector('.charts-label-rate').textContent=location.search?'95%':'75%';
+document.querySelector('.line1-count-link').onclick=()=>location.href='navigation-review.html'+location.search;
+</script>

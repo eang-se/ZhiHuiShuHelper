@@ -1,0 +1,42 @@
+name: Build Windows release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Select release version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "RELEASE_TAG=$GITHUB_REF_NAME" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_TAG=v1.0.0" >> "$GITHUB_ENV"
+          fi
+      - name: Build clean archive
+        run: python tools/package_release.py "$RELEASE_TAG"
+      - name: Publish archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+              gh release upload "$RELEASE_TAG" dist/*.zip --clobber
+            else
+              echo "Initial release already exists; use a new version tag for another release."
+            fi
+          else
+            gh release create "$RELEASE_TAG" dist/*.zip --target "$GITHUB_SHA" --title "$RELEASE_TAG" --notes "Windows 运行包：下载 ZIP，解压后运行 Install.cmd 安装依赖，再运行 Start.cmd。"
+          fi
