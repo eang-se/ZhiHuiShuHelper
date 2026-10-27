@@ -7,6 +7,8 @@ import json
 import os
 from pathlib import Path
 import queue
+import sys
+import tempfile
 import threading
 import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
@@ -15,7 +17,7 @@ import mastery as m
 from runtime_control import EventLog, RunControl, Stopped
 from private_state import PrivateStore, PrivateStateError, CookieKeeper
 
-ROOT = Path(__file__).resolve().parent
+ROOT = m.ROOT
 
 
 def load_preferences():
@@ -195,7 +197,10 @@ class App:
         entry.pack(fill='x', pady=(6, 3))
         self.settings_widgets.append(entry)
         ttk.Label(left, textvariable=self.key_status, style='Muted.TLabel', font=('Microsoft YaHei UI', 8), wraplength=230).pack(anchor='w', pady=(0, 6))
-        self.add_combo(left, '浏览器', self.browser, ['msedge', 'chrome', 'chromium'])
+        browsers = ['msedge', 'chrome'] if getattr(sys, 'frozen', False) else ['msedge', 'chrome', 'chromium']
+        if self.browser.get() not in browsers:
+            self.browser.set('msedge')
+        self.add_combo(left, '浏览器', self.browser, browsers)
         ttk.Label(left, text='模型').pack(anchor='w', pady=(9, 3))
         model_entry = ttk.Entry(left, textvariable=self.fields['model'], width=27)
         model_entry.pack(fill='x')
@@ -569,7 +574,46 @@ def main():
     root.mainloop()
 
 
+def package_self_test():
+    """Check the frozen package with the system Edge and temporary data only."""
+    cfg = load_preferences()
+    m.validate_config(cfg)
+    with tempfile.TemporaryDirectory() as tmp:
+        store = PrivateStore(Path(tmp))
+        store.save_key('self-test-key')
+        if store.load_key() != 'self-test-key':
+            raise RuntimeError('Local credential storage failed')
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            App(root, cfg, private_store=store)
+            root.update_idletasks()
+        finally:
+            root.destroy()
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(channel='msedge', headless=True, args=m.BROWSER_BACKGROUND_ARGS)
+            try:
+                page = browser.new_page()
+                page.set_content('<button onclick="this.textContent=\'ok\'">go</button>')
+                page.get_by_role('button').click()
+                if page.get_by_role('button').inner_text() != 'ok':
+                    raise RuntimeError('System browser interaction failed')
+            finally:
+                browser.close()
+
+
 if __name__ == '__main__':
+    if len(sys.argv) == 3 and sys.argv[1] == '--self-test':
+        import traceback
+        report = Path(sys.argv[2])
+        try:
+            package_self_test()
+            report.write_text('ok\n', encoding='utf-8')
+            raise SystemExit(0)
+        except Exception:
+            report.write_text(traceback.format_exc(), encoding='utf-8')
+            raise SystemExit(1)
     try:
         main()
     except Exception as error:

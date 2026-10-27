@@ -11,3 +11,6 @@ profile.json
 *.db
 *.log
 dist/
+build/
+.build-deps/
+*.spec

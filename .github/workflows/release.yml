@@ -2,32 +2,45 @@ name: Build Windows release
 
 on:
   push:
-    branches:
-      - main
-    tags:
-      - 'v*'
+    branches: [main]
+    tags: ['v*']
 
 permissions:
   contents: write
 
 jobs:
   package:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Install build dependencies
+        run: python -m pip install -r requirements.txt pyinstaller==6.16.0
       - name: Select release version
+        shell: pwsh
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            echo "RELEASE_TAG=$GITHUB_REF_NAME" >> "$GITHUB_ENV"
-          else
-            echo "RELEASE_TAG=v1.0.0" >> "$GITHUB_ENV"
-          fi
-      - name: Build clean archive
-        run: python tools/package_release.py "$RELEASE_TAG"
-      - name: Publish archive
+          if ($env:GITHUB_REF.StartsWith('refs/tags/')) { $tag = $env:GITHUB_REF_NAME }
+          else { $tag = 'v1.1.0' }
+          "RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Build executable with system browser support
+        run: python -m PyInstaller --noconfirm --clean --onedir --windowed --name ZhiHuiShuHelper --collect-all playwright --distpath build/artifacts desktop.py
+      - name: Verify frozen app and system Edge
+        shell: pwsh
+        run: |
+          Copy-Item -LiteralPath profile.polymas.json -Destination build/artifacts/ZhiHuiShuHelper/profile.polymas.json
+          $report = Join-Path $env:RUNNER_TEMP 'zhi-self-test.txt'
+          $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $env:RUNNER_TEMP 'no-browser-cache'
+          $process = Start-Process -FilePath 'build/artifacts/ZhiHuiShuHelper/ZhiHuiShuHelper.exe' -ArgumentList @('--self-test', "`"$report`"") -WindowStyle Hidden -PassThru -Wait
+          if (Test-Path -LiteralPath $report) { Get-Content -LiteralPath $report }
+          if ($process.ExitCode -ne 0) { throw "Frozen application self-test failed: $($process.ExitCode)" }
+          if (-not (Test-Path -LiteralPath $report) -or (Get-Content -Raw -LiteralPath $report).Trim() -ne 'ok') { throw 'Frozen application did not produce a successful self-test report' }
+          Remove-Item -LiteralPath build/artifacts/ZhiHuiShuHelper/profile.polymas.json
+      - name: Build clean ZIP
+        run: python tools/package_release.py ${{ env.RELEASE_TAG }} --app-dir build/artifacts/ZhiHuiShuHelper
+      - name: Publish ZIP
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -35,8 +48,8 @@ jobs:
             if [[ "$GITHUB_REF" == refs/tags/* ]]; then
               gh release upload "$RELEASE_TAG" dist/*.zip --clobber
             else
-              echo "Initial release already exists; use a new version tag for another release."
+              echo "Release already exists; push a new version tag for another release."
             fi
           else
-            gh release create "$RELEASE_TAG" dist/*.zip --target "$GITHUB_SHA" --title "$RELEASE_TAG" --notes "Windows 运行包：下载 ZIP，解压后运行 Install.cmd 安装依赖，再运行 Start.cmd。"
+            gh release create "$RELEASE_TAG" dist/*.zip --target "$GITHUB_SHA" --title "$RELEASE_TAG" --notes "Windows x64：解压后双击 ZhiHuiShuHelper.exe，使用系统中的 Edge 或 Chrome，无需安装 Python。需要联网、智慧树账号及 DeepSeek API Key。"
           fi

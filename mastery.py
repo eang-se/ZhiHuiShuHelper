@@ -21,7 +21,11 @@ from dataclasses import dataclass
 from typing import Any
 from private_state import PrivateStore, PrivateStateError, CookieKeeper
 
-ROOT = Path(__file__).resolve().parent
+def app_root() -> Path:
+    return Path(sys.executable).resolve().parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent
+
+
+ROOT = app_root()
 API_URL = "https://api.deepseek.com/chat/completions"
 BROWSER_BACKGROUND_ARGS = [
     '--disable-background-timer-throttling',

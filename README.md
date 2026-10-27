@@ -2,7 +2,7 @@
 
 智慧树网课平台掌握度答题助手，采用独立 Python 程序运行。
 
-运行方式：Python + Playwright 驱动独立浏览器，不需要油猴。默认使用本机 Microsoft Edge，浏览器数据单独保存在 `data/browser-profile/`。
+运行方式：独立程序通过 Playwright 驱动系统中的 Microsoft Edge 或 Google Chrome，不需要油猴。浏览器数据单独保存在 `data/browser-profile/`。
 
 已适配常见知识点答题流程：
 
@@ -10,7 +10,9 @@
 
 ## 使用
 
-首次使用需要 Windows、Python 3.10+ 和 Microsoft Edge。先双击 **Install.cmd** 安装依赖，再双击 **Start.cmd** 启动；没有 Edge 时可在界面中选择安装的 Chromium。
+Windows x64 发行版：下载 ZIP 并完整解压，双击 **ZhiHuiShuHelper.exe** 即可启动，无需安装 Python 或程序依赖。程序调用电脑中已有的 Microsoft Edge；也可在界面切换到已安装的 Google Chrome。联网、智慧树账号和 DeepSeek API Key 仍是使用本工具的必要条件。
+
+从源码运行时，需要 Python 3.10+；先双击 **Install.cmd** 安装依赖，再双击 **Start.cmd**。
 
 1. 首次在图形窗口输入 DeepSeek API Key，输入后会自动加密保存；下次启动自动读取，无需再次输入。设置目标掌握度和运行上限，点击 **开始**。
 2. 首次在新打开的浏览器中登录，之后会自动保存并恢复 Cookie。这个浏览器与 GPT 内置浏览器的登录状态独立；平台令登录状态过期或失效时仍需重新登录一次。
@@ -26,7 +28,7 @@
 
 图形窗口达到 **总请求上限** 时，保留当前题目并等待人工调整，不会自动提高上限。需要继续时，将左侧“总请求上限”改为大于已用次数的总数，点击 **保存设置**，再点击 **断点重试**。例如已用 100 次，把上限改为 150 表示本次总共最多 150 次；原来的 100 次继续计数。只点重试而不提高上限仍会等待，不会发送超出额度的请求。运行中保存设置仅会将总请求上限应用于当前任务，其他设置下次开始生效。
 
-命令行入口保留为 **Start-CLI.cmd**，可在命令窗口按 **Ctrl+C** 停止。
+源码版的命令行入口为 **Start-CLI.cmd**，可在命令窗口按 **Ctrl+C** 停止。
 
 API Key 和 Cookie 分别加密保存在 `data/api-key.dpapi`、`data/browser-cookies.dpapi`，使用 Windows 当前用户的 DPAPI，不写入明文设置。清空 API Key 输入框会删除已保存的 Key。浏览器配置仍保存在固定的 `data/browser-profile/`，保留站点本地存储。
 
@@ -34,7 +36,7 @@ API Key 和 Cookie 分别加密保存在 `data/api-key.dpapi`、`data/browser-co
 
 脚本从答题网址读取课程 ID 和知识点 ID，再打开同课程的知识学习页，从 DOM 中读取章节 ID、章节名、知识单元和知识点名。补充页面读取完成后会关闭，返回答题页继续。读取失败会停止并说明原因，避免把题目归入错误章节。
 
-迁移到其他电脑时，先安装 Python 3.10+，双击 **Install.cmd** 安装依赖。如果没有 Edge，安装程序会下载 Chromium，此时使用：
+以下命令用于源码版。源码版可以安装 Chromium 并运行：
 
 ```powershell
 .\Run.ps1 -Browser chromium
@@ -127,13 +129,13 @@ API Key 和 Cookie 分别加密保存在 `data/api-key.dpapi`、`data/browser-co
 测试：
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest test_mastery test_desktop test_page_loading test_checkbox test_private_state test_retry test_review_restart test_api_limit test_minimized -v
+.\.venv\Scripts\python.exe -m unittest test_mastery test_desktop test_page_loading test_checkbox test_private_state test_retry test_review_restart test_api_limit test_minimized test_packaging -v
 ```
 
 测试使用本地模拟页面和模拟 AI，不会向智慧树提交作业，也不消耗 DeepSeek 额度。
 
 ## 发行包
 
-从 GitHub Releases 下载 Windows ZIP，解压后先运行 `Install.cmd`，再运行 `Start.cmd`。ZIP 不包含 Python 本身，首次安装需要 Python 3.10+ 和网络连接。
+从 GitHub Releases 下载 Windows x64 ZIP，完整解压后运行 `ZhiHuiShuHelper.exe`。运行环境已打包，浏览器使用本机安装的 Edge 或 Chrome。旧版 v1.0.0 是源码运行包，需要安装 Python；请优先下载较新的可执行版本。
 
-维护者可运行 `python tools/package_release.py v1.0.0` 生成只包含运行必需文件的压缩包。推送 `v*` 标签会自动打包并发布对应版本；首次推送到 `main` 会创建 `v1.0.0`。
+维护者需在 Windows 上安装构建依赖并运行 PyInstaller，再执行 `python tools/package_release.py v1.1.0 --app-dir build/artifacts/ZhiHuiShuHelper`。GitHub Actions 会自动构建、检查系统 Edge 和发布 `v*` 标签对应的发行包。
