@@ -83,6 +83,7 @@ def browser_worker(cfg, browser, api_key, control):
                 control.emit('phase', status='启动中', message='正在打开独立浏览器')
                 context = pw.chromium.launch_persistent_context(str(ROOT/'data'/'browser-profile'),
                     headless=False, viewport={'width': 1440, 'height': 950}, args=m.BROWSER_BACKGROUND_ARGS, **options)
+                m.watch_image_responses(context)
                 control.emit('browser', opened=True)
                 cookies = CookieKeeper(context, PrivateStore(ROOT/'data'))
                 try:

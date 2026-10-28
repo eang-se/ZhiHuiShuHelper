@@ -54,6 +54,7 @@ API Key 和 Cookie 分别加密保存在 `data/api-key.dpapi`、`data/browser-co
 - 题目签名包含题干、题型、选项内容和空数，选项顺序改变仍可命中；选项内容不同则重新求解。
 - 同一道题在答题页和解析页出现的中文汉字间排版空格统一匹配，例如“测试 选项”与“测试选项”；英文单词间隔、大小写、标点和数学内容保持区分。启动时兼容更新旧题库及作答／解析记录中的签名，合并时优先保留平台确认的答案，再比较更新时间，历史作答不删除。
 - 未命中时调用 DeepSeek，验证返回答案和选项是否合法，再填写并回读选中状态。
+- 题干和选项中的图片、公式图片、画布或 SVG 会作为图片随题目发送给支持视觉输入的模型（默认 `deepseek-flash`）。题库仅保存图片标记和摘要，不保存图片原始内容；图片像素发生变化时，不复用已有答案。
 - 兼容大小写字母、全角字母、逗号分隔／连写的选项字母及能唯一匹配的完整选项文字。仍验证选项范围、重复项及单选数量；无法确认时自动请求一次格式修正，仍失败则等待手动断点重试，不填写猜测答案。
 - 提交后读取本知识点的掌握度，采集解析页中本轮全部题目。
 - 等待成绩请求结束、总题数加载且掌握度稳定后才记录结果；首次仍为 0% 时，会刷新结果页核对一次，不重复提交答案。合法的 0% 以及与上轮相同的掌握度均可识别。
@@ -94,7 +95,7 @@ API Key 和 Cookie 分别加密保存在 `data/api-key.dpapi`、`data/browser-co
 | `zero_score_grace_seconds` | 0% 数值至少等待 8 秒再核对，避免读取初始占位值 |
 | `refresh_zero_result` | `true`：首次 0% 时仅刷新知识点结果页一次，不重复提交 |
 
-实际调用 DeepSeek 需要有效 API Key 和可用额度。请求只发送当前题干、选项和该题历史反馈；不发送登录 Cookie 或整个页面。调用采用官方 [Chat Completions API](https://api-docs.deepseek.com/api/create-chat-completion/) 和 [JSON 输出](https://api-docs.deepseek.com/guides/json_mode/)。
+实际调用 DeepSeek 需要有效 API Key 和可用额度。请求发送当前题干、选项、题目中的图片和该题历史反馈；不发送登录 Cookie 或整个页面。调用采用官方 [Chat Completions API](https://api-docs.deepseek.com/api/create-chat-completion/)、[图片输入](https://api-docs.deepseek.com/guides/vision/)和 [JSON 输出](https://api-docs.deepseek.com/guides/json_mode/)。
 
 低置信度默认继续使用 AI 建议，建议会保留为“未经平台确认”，不会直接当作正确答案复用。提交后仍按平台的参考答案修正题库。若选择 `pause`，图形窗口会暂停并显示建议，点击“继续”接受建议，点击“停止”结束；命令行模式可按回车继续或输入 `q` 停止。
 
@@ -124,12 +125,12 @@ API Key 和 Cookie 分别加密保存在 `data/api-key.dpapi`、`data/browser-co
 
 多选题已适配 Element UI 的 `label + checkbox` 控件，支持勾选、取消勾选及原生状态回读。旧版已保存配置也有相应兼容处理。
 
-文本版遇到题干/选项中的图片、画布、无法识别的题型或自定义编辑器会停止。填空题的真实课程控件尚未演示，如其结构与配置不同，需要补充适配。DeepSeek 生成的答案不能保证全对；请求上限可在图形界面中调整，轮数或时长达到上限后会停止。
+图片需要加载完成才能作答；单张图片上限 8 MiB，单题最多 32 张、合计最多 24 MiB。图片或公式识别可能出错；不支持视觉输入的模型无法处理图片题。无法识别的题型或自定义编辑器会停止。填空题的真实课程控件尚未演示，如其结构与配置不同，需要补充适配。DeepSeek 生成的答案不能保证全对；请求上限可在图形界面中调整，轮数或时长达到上限后会停止。
 
 测试：
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest test_mastery test_desktop test_page_loading test_checkbox test_private_state test_retry test_review_restart test_api_limit test_minimized test_packaging -v
+.\.venv\Scripts\python.exe -m unittest test_mastery test_desktop test_page_loading test_checkbox test_private_state test_retry test_review_restart test_api_limit test_minimized test_packaging test_images -v
 ```
 
 测试使用本地模拟页面和模拟 AI，不会向智慧树提交作业，也不消耗 DeepSeek 额度。

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import math
@@ -17,7 +18,7 @@ import urllib.request
 from urllib.parse import urlparse, parse_qs
 import uuid
 import getpass
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from private_state import PrivateStore, PrivateStateError, CookieKeeper
 
@@ -88,6 +89,63 @@ class PageLoading(RuntimeError):
     pass
 
 
+def image_mime(data: bytes) -> str | None:
+    if data.startswith(b'\x89PNG\r\n\x1a\n'):
+        return 'image/png'
+    if data.startswith(b'\xff\xd8\xff'):
+        return 'image/jpeg'
+    if data.startswith((b'GIF87a', b'GIF89a')):
+        return 'image/gif'
+    if data.startswith(b'RIFF') and data[8:12] == b'WEBP':
+        return 'image/webp'
+    return None
+
+
+class ImageResponses:
+    """Remember browser image responses, without making another network request."""
+    def __init__(self, context):
+        self.responses = {}
+        self.contents = {}
+        context.on('response', self.remember)
+
+    def remember(self, response):
+        request = response.request
+        if request.resource_type != 'image':
+            return
+        while request is not None:
+            url = request.url
+            self.responses[url] = response
+            self.contents.pop(url, None)
+            request = request.redirected_from
+        while len(self.responses) > 256:
+            oldest = next(iter(self.responses))
+            self.responses.pop(oldest, None)
+            self.contents.pop(oldest, None)
+
+    def body(self, url):
+        if url in self.contents:
+            return self.contents[url]
+        response = self.responses.get(url)
+        if response is None:
+            return None
+        try:
+            data = response.body()
+            if 0 < len(data) <= 8 * 1024 * 1024 and image_mime(data):
+                self.contents[url] = data
+                return data
+        except Exception:
+            pass  # Response may have been evicted after navigation.
+        return None
+
+
+def watch_image_responses(context):
+    watcher = getattr(context, '_mastery_image_responses', None)
+    if watcher is None:
+        watcher = ImageResponses(context)
+        context._mastery_image_responses = watcher
+    return watcher
+
+
 def norm(text: str) -> str:
     # Preserve case and punctuation: NOT/no, x/X, +/− can change an answer.
     return re.sub(r"\s+", " ", unicodedata.normalize("NFC", str(text))).strip()
@@ -115,6 +173,7 @@ class Question:
     kind: str
     options: list[str]
     blanks: int = 0
+    images: dict[str, bytes] = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self):
         self.stem = norm(self.stem)
@@ -137,8 +196,11 @@ class Question:
         return question_signature(self.stem, self.kind, self.options, self.blanks)
 
     def payload(self) -> dict:
-        return {"stem": self.stem, "kind": self.kind, "blanks": self.blanks,
-                "options": [{"id": chr(65+i), "text": x} for i, x in enumerate(self.options)]}
+        result = {"stem": self.stem, "kind": self.kind, "blanks": self.blanks,
+                  "options": [{"id": chr(65+i), "text": x} for i, x in enumerate(self.options)]}
+        if self.images:
+            result['image_hashes'] = {marker: hashlib.sha256(png).hexdigest() for marker, png in self.images.items()}
+        return result
 
 
 def validate_answer(q: Question, values: Any) -> list[str]:
@@ -387,8 +449,13 @@ class Bank:
         return scope
 
     def get(self, scope: str, q: Question) -> list[str] | None:
-        row = self.db.execute("SELECT answer FROM bank WHERE scope=? AND signature=? AND verified=1", (scope, q.key)).fetchone()
-        return validate_answer(q, json.loads(row[0])) if row else None
+        row = self.db.execute("SELECT answer,question FROM bank WHERE scope=? AND signature=? AND verified=1", (scope, q.key)).fetchone()
+        if not row:
+            return None
+        if q.images and json.loads(row[1]).get('image_hashes') != q.payload().get('image_hashes'):
+            # Do not reuse a verified answer if a URL serves different image pixels.
+            return None
+        return validate_answer(q, json.loads(row[0]))
 
     def put(self, scope: str, q: Question, answer: list[str], verified: bool, explanation: str = ""):
         answer = validate_answer(q, answer)
@@ -414,11 +481,16 @@ class Bank:
 
     def history(self, scope: str, q: Question) -> list[dict]:
         # Only evidence from this question; do not send other course/user data to the API.
-        rows = self.db.execute("SELECT correct_text,outcome FROM reviews WHERE scope=? AND signature=? ORDER BY id DESC LIMIT 4", (scope, q.key)).fetchall()
-        failed = self.db.execute("""SELECT DISTINCT a.answer FROM attempts a JOIN reviews r
+        rows = self.db.execute("SELECT correct_text,outcome,question FROM reviews WHERE scope=? AND signature=? ORDER BY id DESC", (scope, q.key)).fetchall()
+        failed = self.db.execute("""SELECT DISTINCT a.answer,a.question,r.question FROM attempts a JOIN reviews r
           ON a.run=r.run AND a.round=r.round AND a.scope=r.scope AND a.signature=r.signature
-          WHERE a.scope=? AND a.signature=? AND r.outcome='wrong' ORDER BY a.id DESC LIMIT 4""", (scope, q.key)).fetchall()
-        return [{"correct_text": x[0], "outcome": x[1]} for x in rows] + [{"rejected_answer": json.loads(x[0])} for x in failed]
+          WHERE a.scope=? AND a.signature=? AND r.outcome='wrong' ORDER BY a.id DESC""", (scope, q.key)).fetchall()
+        hashes = q.payload().get('image_hashes')
+        def matches(payload):
+            return not q.images or json.loads(payload).get('image_hashes') == hashes
+        reviews = [{"correct_text": x[0], "outcome": x[1]} for x in rows if matches(x[2])][:4]
+        rejected = [{"rejected_answer": json.loads(x[0])} for x in failed if matches(x[1]) and matches(x[2])][:4]
+        return reviews + rejected
 
     def export(self, path: Path):
         result: dict[str, Any] = {"version": 1, "chapters": {}}
@@ -534,10 +606,23 @@ class DeepSeek:
                   '{"answers":["A"],"confidence":0.95,"explanation":"简短解析"}。'
                   'single 仅一个大写字母，multiple 为所有正确选项的大写字母数组；'
                   'text 按输入框顺序返回答案字符串数组。不能确定时降低 confidence。'
-                  '参考平台反馈，避免重复 rejected_answer。')
+                  '参考平台反馈，避免重复 rejected_answer。'
+                  '题干和选项中的【图片:摘要】标记对应用户消息中的图片，按标记位置理解公式或图形。')
+        question_text = json.dumps({'question': q.payload(), 'history': history}, ensure_ascii=False)
+        content: Any = question_text
+        if q.images:
+            content = [{'type': 'text', 'text': question_text}]
+            for marker, png in q.images.items():
+                mime = image_mime(png)
+                if mime is None:
+                    raise Halt('图片格式不受支持，请检查图片或人工处理。')
+                content.append({'type': 'text', 'text': f'下面是 {marker} 对应的图片：'})
+                content.append({'type': 'image_url', 'image_url': {
+                    'url': 'data:' + mime + ';base64,' + base64.b64encode(png).decode('ascii'), 'detail': 'original'}})
+            print(f'本题包含 {len(q.images)} 张图片，将连同题目发送至 DeepSeek 识别。')
         body = json.dumps({"model": self.cfg["model"], "messages": [
             {"role": "system", "content": system},
-            {"role": "user", "content": json.dumps({"question": q.payload(), "history": history}, ensure_ascii=False)}],
+            {"role": "user", "content": content}],
             "response_format": {"type": "json_object"}, "max_tokens": 4096,
             "thinking": {"type": "disabled"}, "stream": False}).encode()
         for retry in range(3):
@@ -592,7 +677,8 @@ class DeepSeek:
                         continue
                 if error.code == 429 or 500 <= error.code < 600:
                     raise Retryable(f'DeepSeek HTTP {error.code}，可稍后点击“断点重试”。') from None
-                raise Halt(f"DeepSeek HTTP {error.code}；请检查余额、API Key 和模型配置。") from None
+                detail = '；图片题请确认所选模型支持图片输入（如 deepseek-flash）' if q.images and error.code in (400, 422) else ''
+                raise Halt(f"DeepSeek HTTP {error.code}；请检查余额、API Key 和模型配置{detail}。") from None
             except (urllib.error.URLError, TimeoutError) as error:
                 raise Retryable('DeepSeek 网络请求失败或超时，可点击“断点重试”。') from error
             except (KeyError, IndexError, TypeError, json.JSONDecodeError) as error:
@@ -659,6 +745,7 @@ class BrowserAdapter:
         self._result_inflight = set()
         self._result_activity = time.monotonic()
         self._result_started = None
+        self.image_responses = watch_image_responses(page.context)
 
     def _request_started(self, request):
         if request.resource_type in {'fetch', 'xhr'}:
@@ -769,6 +856,75 @@ class BrowserAdapter:
             node = self.one(option, '.el-checkbox__label .preStyle', '多选题选项正文', optional=True)
         return node
 
+    def content_with_images(self, node, images):
+        """Extract visible text with opaque image markers and capture only those images."""
+        media = node.locator('img:not(svg img), canvas:not(svg canvas), svg:not(svg svg)')
+        count = media.count()
+        if not count:
+            return node.inner_text()
+        if count > 32:
+            raise Halt('单个题干或选项中的图片超过 32 张，无法安全处理。')
+        markers = []
+        for i in range(count):
+            element = media.nth(i)
+            if not element.is_visible():
+                markers.append(None)
+                continue
+            info = element.evaluate('''el => ({tag:el.tagName.toLowerCase(),
+                src:el.tagName.toLowerCase() === 'img' ? (el.currentSrc || el.src || '') : '',
+                loaded:el.tagName.toLowerCase() !== 'img' || (el.complete && el.naturalWidth > 0)})''')
+            if not info['loaded']:
+                raise PageLoading('题目中的图片尚未加载完成')
+            # Full source URL is hashed locally; signed URLs never enter prompts or the bank.
+            source = info['src'] if info['tag'] == 'img' else ''
+            key = hashlib.sha256(source.encode('utf-8')).hexdigest() if source else None
+            png = self.image_responses.body(source) if source else None
+            native_png = None
+            if png is None and info['tag'] == 'img':
+                # Prefer the natural pixels so CSS size and page background do not
+                # change the bank fingerprint. Cross-origin images may taint canvas;
+                # then fall back to a screenshot of just the image element.
+                native_png = element.evaluate('''el => {
+                    try {
+                        if (!el.naturalWidth || !el.naturalHeight || el.naturalWidth * el.naturalHeight > 16000000) return null;
+                        const canvas = document.createElement('canvas');
+                        canvas.width = el.naturalWidth; canvas.height = el.naturalHeight;
+                        canvas.getContext('2d').drawImage(el, 0, 0);
+                        return canvas.toDataURL('image/png');
+                    } catch (_) { return null; }
+                }''')
+            if png is None:
+                png = base64.b64decode(native_png.split(',', 1)[1]) if native_png else element.screenshot(type='png', animations='disabled')
+            if not png or len(png) > 8 * 1024 * 1024:
+                raise Halt('图片为空或超过单张 8 MiB 限制，请人工处理。')
+            if not key:
+                key = hashlib.sha256(png).hexdigest()
+            marker = f'【图片:{key}】'
+            markers.append(marker)
+            if marker in images and images[marker] != png:
+                raise Retryable('同一图片来源在题目中呈现不同内容，无法安全识别，请检查后重试。')
+            images[marker] = png
+        if len(images) > 32 or sum(len(png) for png in images.values()) > 24 * 1024 * 1024:
+            raise Halt('本题图片数量或大小超过限制，请人工处理。')
+        return node.evaluate('''(root, markers) => {
+            let index = 0;
+            function walk(n) {
+                if (n.nodeType === Node.TEXT_NODE) return n.nodeValue || '';
+                if (n.nodeType !== Node.ELEMENT_NODE) return '';
+                const tag = n.tagName.toLowerCase();
+                if (['img', 'canvas', 'svg'].includes(tag)) return markers[index++] || '';
+                const style = getComputedStyle(n);
+                if (style.display === 'none' || style.visibility === 'hidden') {
+                    index += n.querySelectorAll('img:not(svg img), canvas:not(svg canvas), svg:not(svg svg)').length;
+                    return '';
+                }
+                if (tag === 'br') return '\\n';
+                const content = Array.from(n.childNodes, walk).join('');
+                return ['div', 'p', 'pre', 'li'].includes(tag) ? content + ' ' : content;
+            }
+            return walk(root);
+        }''', markers)
+
     def _questions_once(self, review=False) -> list[tuple[Question, Any]]:
         selector = self.s['review_root'] if review else self.s['question']
         if not self.bind_stage(selector):
@@ -782,20 +938,20 @@ class BrowserAdapter:
             if len(stems) != 1:
                 raise Halt('题干定位不唯一，请核对页面结构。')
             stem_node = stems[0]
-            if stem_node.locator("img, canvas").count():
-                raise Halt("检测到图片/画布题干，当前文本版需人工处理该题。")
-            stem = stem_node.inner_text()
+            images = {}
+            stem = self.content_with_images(stem_node, images)
             if not norm(stem):
                 raise PageLoading('题干仍为空')
             options = self.option_nodes(row, review)
             texts = []
             for option in options:
                 text_node = self.option_text_node(option, review)
-                if text_node is None or not norm(text_node.inner_text()):
+                if text_node is None:
                     raise PageLoading('选项正文尚未加载')
-                if text_node.locator("img, canvas").count():
-                    raise Halt("检测到图片选项，需人工处理。")
-                texts.append(text_node.inner_text())
+                text = self.content_with_images(text_node, images)
+                if not norm(text):
+                    raise PageLoading('选项正文尚未加载')
+                texts.append(text)
             type_node = self.one(row, self.selector("type", review), "题型", optional=True) if self.selector("type", review) else None
             kind_text = type_node.inner_text() if type_node else row.inner_text()[:60]
             identity = (stem_identity(stem), tuple(sorted(clean_option(x) for x in texts)))
@@ -821,7 +977,7 @@ class BrowserAdapter:
                 raise PageLoading('选择题选项尚未完整加载')
             if kind == 'text' and not blanks:
                 raise PageLoading('文本答题区域尚未加载，或该编辑器尚未适配')
-            question = Question(stem, kind, texts, blanks)
+            question = Question(stem, kind, texts, blanks, images)
             if not review:
                 self.known_questions[identity] = question
             result.append((question, row))
@@ -1327,6 +1483,7 @@ def main(argv=None):
             channel = {} if args.browser == "chromium" else {"channel": args.browser}
             context = pw.chromium.launch_persistent_context(str(ROOT/"data"/"browser-profile"),
                 headless=False, viewport={"width": 1440, "height": 950}, args=BROWSER_BACKGROUND_ARGS, **channel)
+            watch_image_responses(context)
             cookies = CookieKeeper(context, private_store)
             try:
                 cookies.restore()
