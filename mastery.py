@@ -158,9 +158,24 @@ def stem_identity(text: str) -> str:
     return re.sub(fr'(?<=[{han}])\s+(?=[{han}])', '', norm(text))
 
 
-def question_signature(stem, kind, options, blanks):
-    raw = [stem_identity(stem), kind, sorted(options), blanks]
+def canonical_images(text, hashes):
+    """Match image markers by their content digest, not their page-specific URL."""
+    hashes = hashes or {}
+    def replace(match):
+        digest = hashes.get(match.group(0))
+        return f'【图片内容:{digest}】' if isinstance(digest, str) and re.fullmatch(r'[0-9a-f]{64}', digest) else match.group(0)
+    return re.sub(r'【图片:[0-9a-f]{64}】', replace, text)
+
+
+def question_signature(stem, kind, options, blanks, image_hashes=None):
+    raw = [stem_identity(canonical_images(stem, image_hashes)), kind,
+           sorted(canonical_images(x, image_hashes) for x in options), blanks]
     return hashlib.sha256(json.dumps(raw, ensure_ascii=False).encode()).hexdigest()
+
+
+def payload_signature(payload):
+    return question_signature(payload['stem'], payload['kind'], [item['text'] for item in payload['options']],
+                              payload.get('blanks', 0), payload.get('image_hashes'))
 
 
 def clean_option(text: str) -> str:
@@ -189,11 +204,16 @@ class Question:
             raise Halt("选择题选项数不正确。")
         if any(not x for x in self.options) or len(set(self.options)) != len(self.options):
             raise Halt("选项为空或重复，无法可靠匹配。")
+        if self.images:
+            hashes = {marker: hashlib.sha256(data).hexdigest() for marker, data in self.images.items()}
+            normalized = [canonical_images(option, hashes) for option in self.options]
+            if len(set(normalized)) != len(normalized):
+                raise Halt('存在图片内容相同的重复选项，无法可靠匹配。')
 
     @property
     def key(self) -> str:
         # Reordered choices match the same bank item; changed choice text does not.
-        return question_signature(self.stem, self.kind, self.options, self.blanks)
+        return question_signature(self.stem, self.kind, self.options, self.blanks, self.payload().get('image_hashes'))
 
     def payload(self) -> dict:
         result = {"stem": self.stem, "kind": self.kind, "blanks": self.blanks,
@@ -218,6 +238,23 @@ def validate_answer(q: Question, values: Any) -> list[str]:
         if q.kind == "single" and len(values) != 1:
             raise Halt("单选/判断题只能有一个答案。")
     return values
+
+
+def remap_answer(values, original_hashes, current: Question):
+    """Map stored choice text to the current page only when it is unambiguous."""
+    if current.kind == 'text':
+        return validate_answer(current, values)
+    if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+        raise Halt('题库答案格式不正确。')
+    current_hashes = current.payload().get('image_hashes')
+    mapped = []
+    for value in values:
+        target = canonical_images(value, original_hashes)
+        matches = [option for option in current.options if canonical_images(option, current_hashes) == target]
+        if len(matches) != 1:
+            raise Halt('题库答案无法唯一对应当前选项。')
+        mapped.append(matches[0])
+    return validate_answer(current, mapped)
 
 
 def choice_answers(q: Question, raw: Any) -> list[str]:
@@ -423,7 +460,7 @@ class Bank:
                     try:
                         value = json.loads(payload)
                         # Stored options are already cleaned; never strip them twice.
-                        key = question_signature(value['stem'], value['kind'], [item['text'] for item in value['options']], value.get('blanks', 0))
+                        key = payload_signature(value)
                     except (Halt, KeyError, TypeError, ValueError):
                         continue  # Leave an unreadable legacy record intact.
                     if key == signature:
@@ -452,10 +489,13 @@ class Bank:
         row = self.db.execute("SELECT answer,question FROM bank WHERE scope=? AND signature=? AND verified=1", (scope, q.key)).fetchone()
         if not row:
             return None
-        if q.images and json.loads(row[1]).get('image_hashes') != q.payload().get('image_hashes'):
-            # Do not reuse a verified answer if a URL serves different image pixels.
+        try:
+            old = json.loads(row[1])
+            if payload_signature(old) != q.key:
+                return None
+            return remap_answer(json.loads(row[0]), old.get('image_hashes'), q)
+        except (Halt, ValueError, TypeError, KeyError):
             return None
-        return validate_answer(q, json.loads(row[0]))
 
     def put(self, scope: str, q: Question, answer: list[str], verified: bool, explanation: str = ""):
         answer = validate_answer(q, answer)
@@ -485,11 +525,43 @@ class Bank:
         failed = self.db.execute("""SELECT DISTINCT a.answer,a.question,r.question FROM attempts a JOIN reviews r
           ON a.run=r.run AND a.round=r.round AND a.scope=r.scope AND a.signature=r.signature
           WHERE a.scope=? AND a.signature=? AND r.outcome='wrong' ORDER BY a.id DESC""", (scope, q.key)).fetchall()
-        hashes = q.payload().get('image_hashes')
         def matches(payload):
-            return not q.images or json.loads(payload).get('image_hashes') == hashes
-        reviews = [{"correct_text": x[0], "outcome": x[1]} for x in rows if matches(x[2])][:4]
-        rejected = [{"rejected_answer": json.loads(x[0])} for x in failed if matches(x[1]) and matches(x[2])][:4]
+            try:
+                return payload_signature(json.loads(payload)) == q.key
+            except (Halt, ValueError, TypeError, KeyError):
+                return False
+        reviews = []
+        for correct, outcome, payload in rows:
+            if not matches(payload):
+                continue
+            if q.images:
+                old = json.loads(payload)
+                try:
+                    # Stored option text is already cleaned. Prefix once so the
+                    # constructor removes only our label, not meaningful text.
+                    options = [f"{chr(65+i)}. {o['text']}" for i, o in enumerate(old['options'])]
+                    original = Question(old['stem'], old['kind'], options, old.get('blanks', 0))
+                    answer = review_answer(original, correct)
+                    if answer is None:
+                        continue
+                    reviews.append({'correct_answer': remap_answer(answer, old.get('image_hashes'), q), 'outcome': outcome})
+                except Halt:
+                    continue
+            else:
+                reviews.append({'correct_text': correct, 'outcome': outcome})
+            if len(reviews) == 4:
+                break
+        rejected = []
+        for answer, attempted_payload, review_payload in failed:
+            if not matches(attempted_payload) or not matches(review_payload):
+                continue
+            try:
+                old = json.loads(attempted_payload)
+                rejected.append({'rejected_answer': remap_answer(json.loads(answer), old.get('image_hashes'), q)})
+            except (Halt, ValueError, KeyError, TypeError):
+                continue
+            if len(rejected) == 4:
+                break
         return reviews + rejected
 
     def export(self, path: Path):
@@ -954,7 +1026,9 @@ class BrowserAdapter:
                 texts.append(text)
             type_node = self.one(row, self.selector("type", review), "题型", optional=True) if self.selector("type", review) else None
             kind_text = type_node.inner_text() if type_node else row.inner_text()[:60]
-            identity = (stem_identity(stem), tuple(sorted(clean_option(x) for x in texts)))
+            hashes = {marker: hashlib.sha256(data).hexdigest() for marker, data in images.items()}
+            identity = (stem_identity(canonical_images(stem, hashes)),
+                        tuple(sorted(canonical_images(clean_option(x), hashes) for x in texts)))
             known = self.known_questions.get(identity)
             if "多选" in kind_text or row.locator("input[type=checkbox], [role=checkbox]").count():
                 kind = "multiple"
@@ -1312,7 +1386,13 @@ class Runner:
                         elif outcome == "wrong":
                             self.bank.invalidate(self.scope, q)
                         elif outcome == "correct" and q.key in attempted:
-                            self.bank.put(self.scope, q, attempted[q.key][1], True, "平台标记本次作答正确")
+                            original, values = attempted[q.key]
+                            try:
+                                answer = remap_answer(values, original.payload().get('image_hashes'), q)
+                            except Halt:
+                                answer = None
+                            if answer is not None:
+                                self.bank.put(self.scope, q, answer, True, "平台标记本次作答正确")
                         reviewed.add(q.key)
                     if not a.next_review(fingerprint):
                         break

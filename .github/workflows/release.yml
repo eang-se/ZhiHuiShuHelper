@@ -24,7 +24,7 @@ jobs:
         shell: pwsh
         run: |
           if ($env:GITHUB_REF.StartsWith('refs/tags/')) { $tag = $env:GITHUB_REF_NAME }
-          else { $tag = 'v1.2.0' }
+          else { $tag = 'v1.2.1' }
           "RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Build executable with system browser support
         run: python -m PyInstaller --noconfirm --clean --onedir --windowed --name ZhiHuiShuHelper --collect-all playwright --distpath build/artifacts desktop.py
