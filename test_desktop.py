@@ -134,9 +134,9 @@ class SequenceBrowserTests(base_tests.BrowserTests):
     test_hidden_recommendation_questions_are_not_collected = None
     test_full_document_navigations_and_retry = None
 
-    def prepare(self, max_calls=100):
+    def prepare(self, max_calls=100, construction=False):
         context = self.page.context
-        point_data = [('11', '101', 0), ('12', '101', 99), ('13', '102', 0), ('14', '102', None)]
+        point_data = [('11', '101', 0), ('12', '101', 99), ('13', '102', 0), ('14', '102', 0 if construction else None)]
         blocks = []
         for chapter in ('101', '102'):
             cards = ''.join(f'<div knowledgeid="{pid}" id="knowledgeId-{pid}"><div class="item-title">Point {pid}</div>'
@@ -153,6 +153,8 @@ class SequenceBrowserTests(base_tests.BrowserTests):
             parts = url.path.strip('/').split('/')
             if parts[0] == 'singleCourse':
                 html = graph
+            elif parts[0] == 'resource' and construction and parts[1] == '13':
+                html = '<meta charset="utf-8"><div>题库建设中</div>'
             elif parts[0] == 'resource':
                 html = f'<meta charset="utf-8"><button onclick="location.href=\'/masteryHistory/1/9/{parts[1]}\'">去提升</button>'
             elif parts[0] == 'masteryHistory':
@@ -196,6 +198,24 @@ class SequenceBrowserTests(base_tests.BrowserTests):
         self.assertEqual([e['point']['knowledge_id'] for e in events if e['kind']=='point_skipped'], ['12', '14'])
         self.assertEqual(limits.calls, 2)
         self.assertEqual(self.bank.db.execute('SELECT COUNT(DISTINCT scope) FROM bank').fetchone()[0], 2)
+
+    def test_construction_skips_to_next_point_without_answering_it(self):
+        context, cfg, meta, control, limits, ai = self.prepare(construction=True)
+        with patch.object(m, 'ROOT', Path(self.tmp.name)), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(m.run_course(context, self.page, cfg, self.bank, limits, ai=ai, metadata=meta), 95)
+        events = []
+        while not control.events.empty():
+            events.append(control.events.get_nowait())
+        skipped = [(e['point']['knowledge_id'], e['reason']) for e in events if e['kind'] == 'point_skipped']
+        self.assertIn(('13', '题库或练习建设中'), skipped)
+        self.assertEqual([e['point']['knowledge_id'] for e in events if e['kind'] == 'point_done'], ['11', '14'])
+        self.assertEqual(limits.calls, 2)
+
+    def test_unrelated_construction_text_does_not_skip(self):
+        self.page.set_content('<div>视频建设中</div><div style="display:none">题库建设中</div>')
+        self.assertFalse(m.CourseNavigator.under_construction(self.page.locator('body')))
+        self.page.set_content('<div>题库建设中</div>')
+        self.assertTrue(m.CourseNavigator.under_construction(self.page.locator('body')))
 
     def test_global_request_limit_not_reset_for_next_point(self):
         context, cfg, meta, control, limits, ai = self.prepare(max_calls=1)

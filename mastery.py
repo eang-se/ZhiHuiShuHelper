@@ -1447,21 +1447,32 @@ class CourseNavigator:
                 raise Halt('目录中的知识点或章节信息不完整。')
             point.update(course_id=current['course_id'], class_id=current['class_id'])
         self.limits.report('catalogue', points=points, current_id=current['knowledge_id'])
-        target, skipped = following_points(points, current, self.cfg['target'], self.cfg.get('next_scope', 'course'))
-        for point, reason in skipped:
-            print(f"跳过：{point['knowledge_title']}（{reason}）")
-            self.limits.report('point_skipped', point=point, reason=reason)
-        if target is None:
-            return None
-        self.limits.check()
-        print(f"进入下一个知识点：{target['chapter_title']} / {target['knowledge_title']}")
-        self.limits.report('metadata', **target)
-        baseline = set(self.context.pages)
-        self.page.locator('#knowledgeId-'+target['knowledge_id']+' .item-mask').click()
-        self.page = self.limits.retry_step('等待下一个知识点的练习页', lambda: self.wait_for_entry(target, baseline))
-        return target
+        cursor = current
+        while True:
+            target, skipped = following_points(points, cursor, self.cfg['target'], self.cfg.get('next_scope', 'course'))
+            for point, reason in skipped:
+                print(f"跳过：{point['knowledge_title']}（{reason}）")
+                self.limits.report('point_skipped', point=point, reason=reason)
+            if target is None:
+                return None
+            self.limits.check()
+            print(f"进入下一个知识点：{target['chapter_title']} / {target['knowledge_title']}")
+            self.limits.report('metadata', **target)
+            baseline = set(self.context.pages)
+            catalogue_url = self.page.url
+            self.page.locator('#knowledgeId-'+target['knowledge_id']+' .item-mask').click()
+            entry = self.limits.retry_step('等待下一个知识点的练习页', lambda: self.wait_for_entry(target, baseline, catalogue_url))
+            if entry is not None:
+                self.page = entry
+                return target
+            print(f"跳过：{target['knowledge_title']}（题库或练习建设中）")
+            self.limits.report('point_skipped', point=target, reason='题库或练习建设中')
+            cursor = target
+            # Restore the catalogue before considering the next point.
+            self.page.goto(url, wait_until='domcontentloaded', timeout=60000)
+            self.page.locator('#knowledgeId-'+cursor['knowledge_id']).wait_for(state='attached', timeout=self.cfg['timeout_seconds']*1000)
 
-    def wait_for_entry(self, target, baseline):
+    def wait_for_entry(self, target, baseline, catalogue_url=None):
         end = time.monotonic()+self.cfg['timeout_seconds']
         clicked = set()
         while time.monotonic() < end:
@@ -1481,6 +1492,18 @@ class CourseNavigator:
                         nodes = page.locator(selector)
                         if any(nodes.nth(i).is_visible() for i in range(nodes.count())):
                             return page
+                # Only inspect the clicked card on the catalogue, or the destination
+                # reached by that click. Do not treat an unrelated resource as a quiz.
+                if page == self.page and catalogue_url is not None and page.url == catalogue_url:
+                    area = page.locator('#knowledgeId-'+target['knowledge_id'])
+                elif page not in baseline or (page == self.page and catalogue_url is not None and page.url != catalogue_url):
+                    area = page.locator('body')
+                else:
+                    continue
+                if self.under_construction(area):
+                    return None
+                if page == self.page and catalogue_url is not None and page.url == catalogue_url:
+                    continue
                 for name, button in [('history', page.locator('.improve-btn')), ('resource', page.get_by_role('button', name='去提升', exact=True))]:
                     key = (id(page), page.url, name)
                     if key in clicked:
@@ -1492,6 +1515,21 @@ class CourseNavigator:
                         break
             self.page.wait_for_timeout(150)
         raise Retryable('等待下一知识点练习超时。请检查当前页面后点击“断点重试”。')
+
+    @staticmethod
+    def under_construction(area):
+        # Match concise, visible quiz-specific messages only, not arbitrary
+        # "建设中" labels for videos or other resources on the same page.
+        return bool(area.count() and area.evaluate(r"""root => {
+          const terms = /(?:题库|试题|题目|练习|测验|考试)/;
+          return [root, ...root.querySelectorAll('*')].some(el => {
+            const rect = el.getBoundingClientRect(), style = getComputedStyle(el);
+            if (!rect.width || !rect.height || style.visibility === 'hidden' || style.display === 'none') return false;
+            const text = (el.innerText || '').replace(/\s+/g, '');
+            return text.length <= 35 && text.includes('建设中') && terms.test(text);
+          });
+        }"""))
+
 
 
 def run_course(context, page, cfg, bank, limits, ai=None, metadata=None, navigator=None):
