@@ -19,12 +19,12 @@ jobs:
       - name: Install build dependencies
         run: python -m pip install -r requirements.txt pyinstaller==6.16.0
       - name: Test image questions
-        run: python -m unittest test_images test_desktop.SequenceBrowserTests -v
+        run: python -m unittest test_images test_desktop.SequenceBrowserTests test_mastery.BrowserTests -v
       - name: Select release version
         shell: pwsh
         run: |
           if ($env:GITHUB_REF.StartsWith('refs/tags/')) { $tag = $env:GITHUB_REF_NAME }
-          else { $tag = 'v1.2.5' }
+          else { $tag = 'v1.2.6' }
           "RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Build executable with system browser support
         run: python -m PyInstaller --noconfirm --clean --onedir --windowed --name ZhiHuiShuHelper --collect-all playwright --distpath build/artifacts desktop.py
@@ -55,3 +55,4 @@ jobs:
           else
             gh release create "$RELEASE_TAG" dist/*.zip --target "$GITHUB_SHA" --title "$RELEASE_TAG" --notes "Windows x64：解压后双击 ZhiHuiShuHelper.exe，使用系统中的 Edge 或 Chrome，无需安装 Python。需要联网、智慧树账号及 DeepSeek API Key。"
           fi
+

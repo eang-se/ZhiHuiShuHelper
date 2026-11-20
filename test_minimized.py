@@ -60,7 +60,7 @@ class MinimizedBrowserTests(unittest.TestCase):
                     self.assertEqual(limits.calls, 3)
                     self.assertEqual(seen_images, [1])
                     self.assertEqual(bank.db.execute('SELECT COUNT(*) FROM attempts').fetchone()[0], 4)
-                    self.assertEqual(bank.db.execute('SELECT COUNT(*) FROM reviews').fetchone()[0], 4)
+                    self.assertEqual(bank.db.execute('SELECT COUNT(*) FROM reviews').fetchone()[0], 2)
                     self.assertEqual(cdp.send('Browser.getWindowBounds', {'windowId': window_id})['bounds']['windowState'], 'minimized')
                 finally:
                     bank.close()
@@ -71,3 +71,4 @@ class MinimizedBrowserTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+

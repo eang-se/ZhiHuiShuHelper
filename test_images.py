@@ -227,9 +227,10 @@ class ImageBrowserTests(base_tests.BrowserTests):
         self.assertEqual(len(seen), 3)
         self.assertEqual(len(seen[0].images), 1)
         self.assertEqual(self.bank.db.execute('SELECT COUNT(*) FROM attempts').fetchone()[0], 4)
-        self.assertEqual(self.bank.db.execute('SELECT COUNT(*) FROM reviews').fetchone()[0], 4)
+        self.assertEqual(self.bank.db.execute('SELECT COUNT(*) FROM reviews').fetchone()[0], 2)
         self.assertEqual(self.bank.db.execute("SELECT COUNT(*) FROM attempts WHERE source='bank'").fetchone()[0], 1)
 
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+

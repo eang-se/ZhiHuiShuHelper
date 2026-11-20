@@ -252,7 +252,7 @@ class ReviewBrowserTests(base_tests.BrowserTests):
             self.assertEqual(m.Runner(m.BrowserAdapter(self.page, cfg, limits), self.bank, ai, cfg, 'chapter', 'point', limits).run(), 95)
         self.assertEqual(ai.calls, 3)
         self.assertEqual(self.bank.db.execute('SELECT COUNT(*) FROM attempts').fetchone()[0], 4)
-        self.assertEqual(self.bank.db.execute('SELECT COUNT(*) FROM reviews').fetchone()[0], 4)
+        self.assertEqual(self.bank.db.execute('SELECT COUNT(*) FROM reviews').fetchone()[0], 2)
         self.assertEqual(self.bank.db.execute("SELECT COUNT(*) FROM attempts WHERE source='bank'").fetchone()[0], 1)
         self.assertEqual(self.bank.get('chapter', m.Question(stem, 'single', ['3', '4'])), ['4'])
 
@@ -287,7 +287,7 @@ class ReviewBrowserTests(base_tests.BrowserTests):
         finally:
             thread.join(6)
         self.assertEqual(stages, ['核对并补全本轮解析'])
-        self.assertEqual(self.bank.db.execute('SELECT COUNT(*) FROM reviews').fetchone()[0], 4)
+        self.assertEqual(self.bank.db.execute('SELECT COUNT(*) FROM reviews').fetchone()[0], 2)
 
     def test_restart_from_review_only_page(self):
         self.page.goto((Path(__file__).parent/'tests'/'navigation-review.html').as_uri())
@@ -342,3 +342,4 @@ class ReviewBrowserTests(base_tests.BrowserTests):
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+

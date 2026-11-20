@@ -146,9 +146,9 @@ class SequenceBrowserTests(base_tests.BrowserTests):
         self.bank.close()
         self.tmp.cleanup()
 
-    def prepare(self, max_calls=100, construction=False, missing_score=False):
+    def prepare(self, max_calls=100, construction=False, missing_score=False, exempt=False):
         context = self.page.context
-        point_data = [('11', '101', 0), ('12', '101', 99), ('13', '102', 0), ('14', '102', None if missing_score else (0 if construction else 99))]
+        point_data = [('11', '101', 0), ('12', '101', 99), ('13', '102', 0), ('14', '102', None if missing_score else (0 if construction or exempt else 99))]
         blocks = []
         for chapter in ('101', '102'):
             cards = ''.join(f'<div knowledgeid="{pid}" id="knowledgeId-{pid}"><div class="item-title">Point {pid}</div>'
@@ -165,6 +165,14 @@ class SequenceBrowserTests(base_tests.BrowserTests):
             parts = url.path.strip('/').split('/')
             if parts[0] == 'singleCourse':
                 html = graph
+            elif parts[0] == 'resource' and exempt and parts[1] == '13':
+                html = "<meta charset='utf-8'><script>location.href='/learnPage/1/13/9'</script>"
+            elif parts[0] == 'learnPage' and exempt == 'action':
+                html = "<meta charset='utf-8'><h1>Point 13</h1><div>免考知识点，无练习题</div><button onclick=\"location.href='/masteryHistory/1/9/13'\">去提升</button>"
+            elif parts[0] == 'learnPage' and exempt == 'stale':
+                html = """<meta charset='utf-8'><div id='status'><h1>Other point</h1><div>免考知识点，无练习题</div></div><script>setTimeout(() => {document.getElementById('status').innerHTML = `<h1>Point 13</h1><button onclick=\"location.href='/masteryHistory/1/9/13'\">去提升</button>`}, 1200);</script>"""
+            elif parts[0] == 'learnPage':
+                html = "<meta charset='utf-8'><h1>Point 13</h1><div>免考知识点，无练习题</div>"
             elif parts[0] == 'resource' and construction == 'delayed' and parts[1] == '13':
                 html = """<meta charset='utf-8'><div id='status'><span>知识点最高掌握度：</span><b>0%</b><button>建设中</button></div><script>setTimeout(() => {document.getElementById('status').innerHTML = `<button onclick=\"location.href='/masteryHistory/1/9/13'\">去提升</button>`}, 800);</script>"""
             elif parts[0] == 'resource' and construction and parts[1] == '13':
@@ -211,7 +219,49 @@ class SequenceBrowserTests(base_tests.BrowserTests):
         self.assertEqual([e['point']['knowledge_id'] for e in events if e['kind']=='point_done'], ['11', '13'])
         self.assertEqual([e['point']['knowledge_id'] for e in events if e['kind']=='point_skipped'], ['12', '14'])
         self.assertEqual(limits.calls, 2)
-        self.assertEqual(self.bank.db.execute('SELECT COUNT(DISTINCT scope) FROM bank').fetchone()[0], 2)
+        self.assertEqual(self.bank.db.execute('SELECT COUNT(DISTINCT scope) FROM attempts').fetchone()[0], 2)
+        self.assertEqual(self.bank.db.execute('SELECT COUNT(*) FROM bank').fetchone()[0], 0)
+
+    def test_explicit_exemption_skips_target_then_continues(self):
+        context, cfg, meta, control, limits, ai = self.prepare(exempt=True)
+        with patch.object(m, 'ROOT', Path(self.tmp.name)), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(m.run_course(context, self.page, cfg, self.bank, limits, ai=ai, metadata=meta), 95)
+        events = []
+        while not control.events.empty():
+            events.append(control.events.get_nowait())
+        self.assertIn(('13', '免考知识点，无练习题'), [(e['point']['knowledge_id'], e['reason']) for e in events if e['kind'] == 'point_skipped'])
+        self.assertEqual([e['point']['knowledge_id'] for e in events if e['kind'] == 'point_done'], ['11', '14'])
+        self.assertEqual(limits.calls, 2)
+
+    def test_available_practice_takes_priority_over_exemption_label(self):
+        context, cfg, meta, control, limits, ai = self.prepare(exempt='action')
+        with patch.object(m, 'ROOT', Path(self.tmp.name)), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(m.run_course(context, self.page, cfg, self.bank, limits, ai=ai, metadata=meta), 95)
+        events = []
+        while not control.events.empty():
+            events.append(control.events.get_nowait())
+        self.assertIn('13', [e['point']['knowledge_id'] for e in events if e['kind'] == 'point_done'])
+        self.assertNotIn('13', [e['point']['knowledge_id'] for e in events if e['kind'] == 'point_skipped'])
+
+    def test_old_exemption_message_is_not_used_for_a_new_point(self):
+        context, cfg, meta, control, limits, ai = self.prepare(exempt='stale')
+        with patch.object(m, 'ROOT', Path(self.tmp.name)), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(m.run_course(context, self.page, cfg, self.bank, limits, ai=ai, metadata=meta), 95)
+        events = []
+        while not control.events.empty():
+            events.append(control.events.get_nowait())
+        self.assertIn('13', [e['point']['knowledge_id'] for e in events if e['kind'] == 'point_done'])
+        self.assertNotIn('13', [e['point']['knowledge_id'] for e in events if e['kind'] == 'point_skipped'])
+
+    def test_exemption_requires_correct_target_and_visible_exact_message(self):
+        ids = {'course_id':'1', 'knowledge_id':'13', 'class_id':'9'}
+        self.assertEqual(m.CourseNavigator.learn_page_ids('https://ai-smart-course-student-pro.zhihuishu.com/learnPage/1/13/9'), ids)
+        self.assertNotEqual(m.CourseNavigator.learn_page_ids('https://ai-smart-course-student-pro.zhihuishu.com/learnPage/1/12/9'), ids)
+        self.assertIsNone(m.CourseNavigator.learn_page_ids('https://example.org/learnPage/1/13/9'))
+        self.page.set_content('<div style="display:none">免考知识点，无练习题</div><div>提示：免考知识点，无练习题以平台为准</div>')
+        self.assertFalse(m.CourseNavigator.explicit_exemption(self.page.locator('body')))
+        self.page.set_content('<div>免考知识点，无练习题</div>')
+        self.assertTrue(m.CourseNavigator.explicit_exemption(self.page.locator('body')))
 
     def test_missing_mastery_does_not_skip_a_working_quiz(self):
         context, cfg, meta, control, limits, ai = self.prepare(missing_score=True)
@@ -363,3 +413,4 @@ class SequenceBrowserTests(base_tests.BrowserTests):
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+

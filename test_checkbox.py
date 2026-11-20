@@ -78,4 +78,5 @@ class ElementCheckboxTests(base_tests.BrowserTests):
             self.assertEqual(m.Runner(adapter, self.bank, FakeAI(), cfg, 'chapter', 'point', limits).run(), 95)
         self.assertEqual(limits.calls, 3)
         self.assertEqual(self.bank.db.execute('SELECT COUNT(*) FROM attempts').fetchone()[0], 4)
-        self.assertEqual(self.bank.db.execute("SELECT COUNT(*) FROM reviews WHERE outcome='correct'").fetchone()[0], 3)
+        self.assertEqual(self.bank.db.execute("SELECT COUNT(*) FROM reviews WHERE outcome='correct'").fetchone()[0], 1)
+

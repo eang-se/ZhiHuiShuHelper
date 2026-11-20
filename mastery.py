@@ -1342,6 +1342,7 @@ class Runner:
         for round_ in range(1, self.cfg["max_rounds"]+1):
             self.limits.check()
             attempted: dict[str, tuple[Question, list[str]]] = {}
+            pending_ai: dict[str, tuple[Question, list[str], str]] = {}
             print(f"第 {round_} 轮")
             self.limits.report('round', round=round_)
             if not a.is_result():
@@ -1362,7 +1363,7 @@ class Runner:
                         if answer is None:
                             self.limits.report('phase', status='运行中', message='正在请求 DeepSeek 解答当前题目')
                             answer, explanation = self.limits.retry_step('AI 解答当前题目', lambda: self.ai.answer(q, self.bank.history(self.scope, q)))
-                            self.bank.put(self.scope, q, answer, False, explanation)
+                            pending_ai[q.key] = (q, answer, explanation)
                         self.limits.check()
                         self.limits.report('phase', status='运行中', message='正在填写题库答案' if source == 'bank' else '正在填写 AI 建议答案')
                         self.limits.retry_step('填写当前题目的答案', lambda: a.fill(q, answer))
@@ -1382,6 +1383,11 @@ class Runner:
             score = initial_score if round_ == 1 and initial_score is not None else self.limits.retry_step('读取掌握度', a.score)
             print(f"本知识点掌握度：{score:g}%")
             self.limits.report('score', mastery=score)
+            if score >= self.cfg['target']:
+                print(f"已达到目标 {self.cfg['target']:g}%，跳过解析与本轮题库收录。")
+                return score
+            for q, answer, explanation in pending_ai.values():
+                self.bank.put(self.scope, q, answer, False, explanation)
             # Archive every review question, not only wrong answers or the last page.
             self.limits.report('phase', status='运行中', message='正在读取全部题目与参考答案并保存题库')
             a.open_review()
@@ -1421,9 +1427,6 @@ class Runner:
                     raise Retryable(f'本轮已作答 {len(attempted)} 题，解析已匹配 {len(attempted.keys() & reviewed)} 题，尚缺 {len(missing)} 题：{stems}。可检查解析页后断点重试读取。')
             self.limits.retry_step('核对并补全本轮解析', collect_review)
             self.bank.export(ROOT/"data"/"question-bank.json")
-            if score >= self.cfg["target"]:
-                print(f"已达到目标 {self.cfg['target']:g}%，停止。")
-                return score
             if round_ < self.cfg["max_rounds"]:
                 a.retry()
         raise Halt("已达到最大轮数，仍未达标；已保存题库。")
@@ -1482,13 +1485,20 @@ class CourseNavigator:
             catalogue_url = self.page.url
             self.limits.retry_step('打开下一个知识点', lambda: self.page.locator('#knowledgeId-'+target['knowledge_id']+' .item-mask').click())
             entry = self.limits.retry_step('等待下一个知识点的练习页', lambda: self.wait_for_entry(target, baseline, catalogue_url))
-            self.page = entry
-            return target
+            if entry is not None:
+                self.page = entry
+                return target
+            print(f"跳过：{target['knowledge_title']}（免考知识点，无练习题）")
+            self.limits.report('point_skipped', point=target, reason='免考知识点，无练习题')
+            cursor = target
+            self.page.goto(url, wait_until='domcontentloaded', timeout=60000)
+            self.page.locator('#knowledgeId-'+cursor['knowledge_id']).wait_for(state='attached', timeout=self.cfg['timeout_seconds']*1000)
 
     def wait_for_entry(self, target, baseline, catalogue_url=None):
         end = time.monotonic()+self.cfg['timeout_seconds']
         clicked = set()
         construction_seen = False
+        exempt_since = {}
         while time.monotonic() < end:
             end += self.limits.check()
             candidates = [self.page] + [p for p in self.context.pages if p not in baseline and p != self.page]
@@ -1499,8 +1509,12 @@ class CourseNavigator:
                     ids = platform_ids(page.url)
                 except Halt:
                     ids = None
+                learn_ids = self.learn_page_ids(page.url)
+                expected_ids = {k: target[k] for k in ('course_id', 'class_id', 'knowledge_id')}
+                if learn_ids is not None and learn_ids != expected_ids:
+                    continue
                 if ids:
-                    if ids != {k: target[k] for k in ('course_id', 'class_id', 'knowledge_id')}:
+                    if ids != expected_ids:
                         continue
                     for selector in (self.cfg['selectors']['question'], self.cfg['selectors']['result']):
                         nodes = page.locator(selector)
@@ -1520,20 +1534,54 @@ class CourseNavigator:
                     construction_seen = True
                 if page == self.page and catalogue_url is not None and page.url == catalogue_url:
                     continue
+                # A visible practice action wins over a potentially stale label.
+                has_action = False
                 for name, button in [('history', page.locator('.improve-btn')), ('resource', page.get_by_role('button', name='去提升', exact=True))]:
-                    key = (id(page), page.url, name)
-                    if key in clicked:
-                        continue
                     visible = [button.nth(i) for i in range(button.count()) if button.nth(i).is_visible()]
                     if len(visible) == 1 and visible[0].is_enabled():
-                        self.limits.check()
-                        clicked.add(key)
-                        visible[0].click()
+                        has_action = True
+                        key = (id(page), page.url, name)
+                        if key not in clicked:
+                            self.limits.check()
+                            clicked.add(key)
+                            visible[0].click()
                         break
+                # Only the target's own learnPage can establish exemption; the
+                # same phrase on a different point must never cause a skip.
+                key = (id(page), page.url)
+                titles = page.get_by_text(target['knowledge_title'], exact=True) if learn_ids == expected_ids else None
+                correct_title = bool(titles and any(titles.nth(i).is_visible() for i in range(titles.count())))
+                if not has_action and correct_title and self.explicit_exemption(area):
+                    since = exempt_since.setdefault(key, time.monotonic())
+                    if time.monotonic() - since >= 1.0:
+                        return None
+                else:
+                    exempt_since.pop(key, None)
             self.page.wait_for_timeout(150)
         if construction_seen:
             raise Retryable('等待下一知识点练习超时；页面曾显示“建设中”，该提示也可能是加载占位，无法确认是否有题目。请检查页面或打开目标答题页后点击“断点重试”。')
         raise Retryable('等待下一知识点练习超时。请检查当前页面后点击“断点重试”。')
+
+    @staticmethod
+    def learn_page_ids(url):
+        parsed = urlparse(url)
+        parts = parsed.path.strip('/').split('/')
+        if parsed.hostname != 'ai-smart-course-student-pro.zhihuishu.com' or len(parts) != 4 or parts[0] != 'learnPage':
+            return None
+        if not all(re.fullmatch(r'[0-9]+', value) for value in parts[1:]):
+            return None
+        return {'course_id': parts[1], 'knowledge_id': parts[2], 'class_id': parts[3]}
+
+    @staticmethod
+    def explicit_exemption(area):
+        return bool(area.count() and area.evaluate(r"""root => {
+          return [root, ...root.querySelectorAll('*')].some(el => {
+            const rect = el.getBoundingClientRect(), style = getComputedStyle(el);
+            if (!rect.width || !rect.height || style.visibility === 'hidden' || style.display === 'none') return false;
+            const text = (el.innerText || '').replace(/\s+/g, '');
+            return /^免考知识点[，,、]无练习题[。.]?$/.test(text);
+          });
+        }"""))
 
     @staticmethod
     def under_construction(area):
@@ -1766,3 +1814,4 @@ if __name__ == "__main__":
         if hasattr(console_stream, 'reconfigure'):
             console_stream.reconfigure(encoding='utf-8', errors='replace')
     raise SystemExit(main())
+

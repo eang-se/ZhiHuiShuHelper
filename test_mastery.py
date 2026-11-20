@@ -224,10 +224,33 @@ class BrowserTests(unittest.TestCase):
             self.assertEqual(runner.run(), 95)
         self.assertEqual(ai.calls, 3)
         self.assertEqual(self.bank.db.execute('SELECT COUNT(*) FROM attempts').fetchone()[0], 4)
-        self.assertEqual(self.bank.db.execute('SELECT COUNT(*) FROM reviews').fetchone()[0], 4)
+        self.assertEqual(self.bank.db.execute('SELECT COUNT(*) FROM reviews').fetchone()[0], 2)
         self.assertEqual(self.bank.db.execute("SELECT COUNT(*) FROM attempts WHERE source='bank'").fetchone()[0], 1)
         self.assertEqual(self.bank.get('demo-chapter', m.Question('2 + 2 = ?', 'single', ['4', '3'])), ['4'])
         self.assertEqual(self.page.locator('.charts-label-rate').inner_text(), '95%')
+
+    def test_reaching_target_does_not_open_review_or_add_bank_entries(self):
+        self.page.goto((Path(__file__).parent/'tests'/'workflow.html').as_uri())
+        self.page.evaluate("""() => {
+          const score = document.querySelector('.charts-label-rate');
+          new MutationObserver(() => { if (score.textContent === '75%') score.textContent = '90%'; })
+            .observe(score, {childList: true, characterData: true, subtree: true});
+        }""")
+        cfg = {**config(), 'target': 90, 'action_delay_seconds': .01, 'timeout_seconds': 3, 'result_settle_seconds': .05}
+        limits = m.Limits(cfg)
+        class AI:
+            def answer(ai, q, history):
+                return (['3'] if q.kind == 'single' else ['2', '3']), 'synthetic'
+        existing = m.Question('Existing synthetic entry', 'single', ['yes', 'no'])
+        self.bank.put('chapter', existing, ['yes'], True, 'existing')
+        adapter = m.BrowserAdapter(self.page, cfg, limits)
+        with patch.object(adapter, 'open_review', wraps=adapter.open_review) as review, patch.object(m, 'ROOT', Path(self.tmp.name)), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(m.Runner(adapter, self.bank, AI(), cfg, 'chapter', 'point', limits).run(), 90)
+        review.assert_not_called()
+        self.assertEqual(self.bank.db.execute('SELECT COUNT(*) FROM bank').fetchone()[0], 1)
+        self.assertEqual(self.bank.get('chapter', existing), ['yes'])
+        self.assertEqual(self.bank.db.execute('SELECT COUNT(*) FROM reviews').fetchone()[0], 0)
+        self.assertEqual(self.bank.db.execute('SELECT COUNT(*) FROM attempts').fetchone()[0], 2)
 
     def test_catalogue_dom_resolves_real_hierarchy(self):
         self.page.set_content('''<div class="single-title">课程名</div><div id="knowledgeItem-222">
@@ -262,8 +285,9 @@ class BrowserTests(unittest.TestCase):
             score = m.Runner(adapter, self.bank, FakeAI(), cfg, 'chapter', 'point', limits).run()
         self.assertEqual(score, 95)
         self.assertEqual(limits.calls, 1)
-        self.assertEqual(self.bank.db.execute('SELECT COUNT(*) FROM reviews').fetchone()[0], 2)
+        self.assertEqual(self.bank.db.execute('SELECT COUNT(*) FROM reviews').fetchone()[0], 1)
 
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+

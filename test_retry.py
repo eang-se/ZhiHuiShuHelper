@@ -225,7 +225,7 @@ class RetryBrowserTests(base_tests.BrowserTests):
         self.assertEqual(stages, ['AI 解答当前题目'])
         self.assertEqual(ai.calls, 4)
         self.assertEqual(self.bank.db.execute('SELECT COUNT(*) FROM attempts').fetchone()[0], 4)
-        self.assertEqual(self.bank.db.execute('SELECT COUNT(*) FROM reviews').fetchone()[0], 4)
+        self.assertEqual(self.bank.db.execute('SELECT COUNT(*) FROM reviews').fetchone()[0], 2)
         self.assertEqual(self.bank.db.execute("SELECT COUNT(*) FROM attempts WHERE source='bank'").fetchone()[0], 1)
 
     def test_result_timeout_does_not_resubmit_or_reconfirm(self):
@@ -257,3 +257,4 @@ class RetryBrowserTests(base_tests.BrowserTests):
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+

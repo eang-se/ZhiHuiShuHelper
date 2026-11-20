@@ -132,7 +132,7 @@ class LoadingBrowserTests(base_tests.BrowserTests):
         adapter = m.BrowserAdapter(self.page, cfg, limits)
         with patch.object(m, 'ROOT', Path(self.tmp.name)), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(m.Runner(adapter, self.bank, FakeAI(), cfg, 'chapter', 'point', limits).run(), 95)
-        self.assertEqual(self.bank.db.execute('SELECT COUNT(*) FROM reviews').fetchone()[0], 4)
+        self.assertEqual(self.bank.db.execute('SELECT COUNT(*) FROM reviews').fetchone()[0], 2)
         self.assertEqual(self.bank.db.execute('SELECT MAX(round) FROM attempts').fetchone()[0], 2)
 
     def test_replaced_iframe_rebinds_and_waits_for_stem(self):
@@ -161,3 +161,4 @@ class LoadingBrowserTests(base_tests.BrowserTests):
 if __name__ == '__main__':
     import unittest
     unittest.main(verbosity=2)
+
