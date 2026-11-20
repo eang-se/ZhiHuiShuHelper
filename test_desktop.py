@@ -65,8 +65,9 @@ class ControlTests(unittest.TestCase):
         points = [{'knowledge_id': str(i), 'chapter_id': 'a' if i<4 else 'b', 'mastery': score}
                   for i, score in enumerate([10, 90, None, 20, 30])]
         target, skipped = m.following_points(points, points[0], 90, 'course')
-        self.assertEqual(target['knowledge_id'], '3')
-        self.assertEqual([reason for _, reason in skipped], ['已达标', '无掌握度练习'])
+        self.assertEqual(target['knowledge_id'], '2')
+        self.assertEqual([reason for _, reason in skipped], ['已达标'])
+        self.assertEqual(m.following_points(points, points[2], 90, 'course')[0]['knowledge_id'], '3')
         self.assertIsNone(m.following_points(points, points[3], 90, 'chapter')[0])
         self.assertEqual(m.following_points(points, points[3], 90, 'course')[0]['knowledge_id'], '4')
         with self.assertRaises(m.Halt):
@@ -145,9 +146,9 @@ class SequenceBrowserTests(base_tests.BrowserTests):
         self.bank.close()
         self.tmp.cleanup()
 
-    def prepare(self, max_calls=100, construction=False):
+    def prepare(self, max_calls=100, construction=False, missing_score=False):
         context = self.page.context
-        point_data = [('11', '101', 0), ('12', '101', 99), ('13', '102', 0), ('14', '102', 0 if construction else None)]
+        point_data = [('11', '101', 0), ('12', '101', 99), ('13', '102', 0), ('14', '102', None if missing_score else (0 if construction else 99))]
         blocks = []
         for chapter in ('101', '102'):
             cards = ''.join(f'<div knowledgeid="{pid}" id="knowledgeId-{pid}"><div class="item-title">Point {pid}</div>'
@@ -164,6 +165,8 @@ class SequenceBrowserTests(base_tests.BrowserTests):
             parts = url.path.strip('/').split('/')
             if parts[0] == 'singleCourse':
                 html = graph
+            elif parts[0] == 'resource' and construction == 'delayed' and parts[1] == '13':
+                html = """<meta charset='utf-8'><div id='status'><span>知识点最高掌握度：</span><b>0%</b><button>建设中</button></div><script>setTimeout(() => {document.getElementById('status').innerHTML = `<button onclick=\"location.href='/masteryHistory/1/9/13'\">去提升</button>`}, 800);</script>"""
             elif parts[0] == 'resource' and construction and parts[1] == '13':
                 html = '<meta charset="utf-8"><div>Some long resource description to ensure the parent is not matched as a short message</div><div style="display:flex;align-items:center;gap:8px"><span>知识点最高掌握度：</span><b>0%</b><button>建设中 ›</button></div>'
             elif parts[0] == 'resource':
@@ -210,17 +213,37 @@ class SequenceBrowserTests(base_tests.BrowserTests):
         self.assertEqual(limits.calls, 2)
         self.assertEqual(self.bank.db.execute('SELECT COUNT(DISTINCT scope) FROM bank').fetchone()[0], 2)
 
-    def test_construction_skips_to_next_point_without_answering_it(self):
-        context, cfg, meta, control, limits, ai = self.prepare(construction=True)
+    def test_missing_mastery_does_not_skip_a_working_quiz(self):
+        context, cfg, meta, control, limits, ai = self.prepare(missing_score=True)
         with patch.object(m, 'ROOT', Path(self.tmp.name)), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(m.run_course(context, self.page, cfg, self.bank, limits, ai=ai, metadata=meta), 95)
         events = []
         while not control.events.empty():
             events.append(control.events.get_nowait())
-        skipped = [(e['point']['knowledge_id'], e['reason']) for e in events if e['kind'] == 'point_skipped']
-        self.assertIn(('13', '题库或练习建设中'), skipped)
-        self.assertEqual([e['point']['knowledge_id'] for e in events if e['kind'] == 'point_done'], ['11', '14'])
-        self.assertEqual(limits.calls, 2)
+        self.assertEqual([e['point']['knowledge_id'] for e in events if e['kind'] == 'point_done'], ['11', '13', '14'])
+        self.assertNotIn('14', [e['point']['knowledge_id'] for e in events if e['kind'] == 'point_skipped'])
+
+    def test_temporary_construction_waits_then_enters_quiz(self):
+        context, cfg, meta, control, limits, ai = self.prepare(construction='delayed')
+        with patch.object(m, 'ROOT', Path(self.tmp.name)), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(m.run_course(context, self.page, cfg, self.bank, limits, ai=ai, metadata=meta), 95)
+        events = []
+        while not control.events.empty():
+            events.append(control.events.get_nowait())
+        self.assertIn('13', [e['point']['knowledge_id'] for e in events if e['kind'] == 'point_done'])
+        self.assertNotIn('13', [e['point']['knowledge_id'] for e in events if e['kind'] == 'point_skipped'])
+
+    def test_persistent_construction_waits_for_manual_retry_instead_of_skip(self):
+        context, cfg, meta, control, limits, ai = self.prepare(construction=True)
+        cfg['timeout_seconds'] = 1
+        nav = m.CourseNavigator(context, self.page, cfg, limits)
+        with patch.object(control, 'wait_for_retry', side_effect=Stopped('manual stop')) as wait, contextlib.redirect_stdout(io.StringIO()), self.assertRaises(Stopped):
+            nav.advance(meta)
+        self.assertIn('可能是加载占位', wait.call_args.args[1])
+        events = []
+        while not control.events.empty():
+            events.append(control.events.get_nowait())
+        self.assertNotIn('13', [e['point']['knowledge_id'] for e in events if e['kind'] == 'point_skipped'])
 
     def test_unrelated_construction_text_does_not_skip(self):
         self.page.set_content('<div>视频建设中</div><div style="display:none">题库建设中</div>')

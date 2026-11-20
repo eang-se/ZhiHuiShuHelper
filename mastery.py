@@ -1440,7 +1440,8 @@ def following_points(points: list[dict], current: dict, target: float, scope: st
             break
         score = point.get('mastery')
         if score is None:
-            skipped.append((point, '无掌握度练习'))
+            # Missing or not-yet-rendered progress does not prove exemption.
+            return point, skipped
         elif isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score) or not 0 <= score <= 100:
             raise Halt('课程目录中的掌握度数值无效。')
         elif score >= target:
@@ -1479,21 +1480,15 @@ class CourseNavigator:
             self.limits.report('metadata', **target)
             baseline = set(self.context.pages)
             catalogue_url = self.page.url
-            self.page.locator('#knowledgeId-'+target['knowledge_id']+' .item-mask').click()
+            self.limits.retry_step('打开下一个知识点', lambda: self.page.locator('#knowledgeId-'+target['knowledge_id']+' .item-mask').click())
             entry = self.limits.retry_step('等待下一个知识点的练习页', lambda: self.wait_for_entry(target, baseline, catalogue_url))
-            if entry is not None:
-                self.page = entry
-                return target
-            print(f"跳过：{target['knowledge_title']}（题库或练习建设中）")
-            self.limits.report('point_skipped', point=target, reason='题库或练习建设中')
-            cursor = target
-            # Restore the catalogue before considering the next point.
-            self.page.goto(url, wait_until='domcontentloaded', timeout=60000)
-            self.page.locator('#knowledgeId-'+cursor['knowledge_id']).wait_for(state='attached', timeout=self.cfg['timeout_seconds']*1000)
+            self.page = entry
+            return target
 
     def wait_for_entry(self, target, baseline, catalogue_url=None):
         end = time.monotonic()+self.cfg['timeout_seconds']
         clicked = set()
+        construction_seen = False
         while time.monotonic() < end:
             end += self.limits.check()
             candidates = [self.page] + [p for p in self.context.pages if p not in baseline and p != self.page]
@@ -1519,20 +1514,25 @@ class CourseNavigator:
                     area = page.locator('body')
                 else:
                     continue
+                # The platform renders '建设中' as a temporary loading placeholder,
+                # so visible text alone is never enough evidence to skip a point.
                 if self.under_construction(area):
-                    return None
+                    construction_seen = True
                 if page == self.page and catalogue_url is not None and page.url == catalogue_url:
                     continue
                 for name, button in [('history', page.locator('.improve-btn')), ('resource', page.get_by_role('button', name='去提升', exact=True))]:
                     key = (id(page), page.url, name)
                     if key in clicked:
                         continue
-                    if button.count() == 1 and button.is_visible() and button.is_enabled():
+                    visible = [button.nth(i) for i in range(button.count()) if button.nth(i).is_visible()]
+                    if len(visible) == 1 and visible[0].is_enabled():
                         self.limits.check()
                         clicked.add(key)
-                        button.click()
+                        visible[0].click()
                         break
             self.page.wait_for_timeout(150)
+        if construction_seen:
+            raise Retryable('等待下一知识点练习超时；页面曾显示“建设中”，该提示也可能是加载占位，无法确认是否有题目。请检查页面或打开目标答题页后点击“断点重试”。')
         raise Retryable('等待下一知识点练习超时。请检查当前页面后点击“断点重试”。')
 
     @staticmethod
