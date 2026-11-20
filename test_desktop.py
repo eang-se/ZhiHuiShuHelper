@@ -165,7 +165,7 @@ class SequenceBrowserTests(base_tests.BrowserTests):
             if parts[0] == 'singleCourse':
                 html = graph
             elif parts[0] == 'resource' and construction and parts[1] == '13':
-                html = '<meta charset="utf-8"><div>题库建设中</div>'
+                html = '<meta charset="utf-8"><div>Some long resource description to ensure the parent is not matched as a short message</div><div style="display:flex;align-items:center;gap:8px"><span>知识点最高掌握度：</span><b>0%</b><button>建设中 ›</button></div>'
             elif parts[0] == 'resource':
                 html = f'<meta charset="utf-8"><button onclick="location.href=\'/masteryHistory/1/9/{parts[1]}\'">去提升</button>'
             elif parts[0] == 'masteryHistory':
@@ -227,6 +227,18 @@ class SequenceBrowserTests(base_tests.BrowserTests):
         self.assertFalse(m.CourseNavigator.under_construction(self.page.locator('body')))
         self.page.set_content('<div>题库建设中</div>')
         self.assertTrue(m.CourseNavigator.under_construction(self.page.locator('body')))
+
+    def test_mastery_construction_button_requires_nearby_visible_label(self):
+        self.page.set_content('<div style="display:flex;align-items:center;gap:10px"><span>知识点最高掌握度：</span><b>0%</b><button>建设中 ›</button></div>')
+        self.assertTrue(m.CourseNavigator.under_construction(self.page.locator('body')))
+        self.page.set_content('<div>知识点最高掌握度：0%<button>建设中</button></div>')
+        self.assertTrue(m.CourseNavigator.under_construction(self.page.locator('body')))
+        self.page.set_content('<div>知识点最高掌握度： 0%</div><div style="margin-top:100px"><button>建设中</button></div>')
+        self.assertFalse(m.CourseNavigator.under_construction(self.page.locator('body')))
+        self.page.set_content('<div style="display:flex"><span>知识点最高掌握度：</span><button style="display:none">建设中</button></div>')
+        self.assertFalse(m.CourseNavigator.under_construction(self.page.locator('body')))
+        self.page.set_content('<div style="display:flex"><span>知识点最高掌握度：</span><button>视频建设中</button></div>')
+        self.assertFalse(m.CourseNavigator.under_construction(self.page.locator('body')))
 
     def test_manual_new_tab_or_same_tab_restarts_with_new_metadata(self):
         for mode in ('new_tab', 'same_tab'):

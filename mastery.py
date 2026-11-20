@@ -1537,16 +1537,26 @@ class CourseNavigator:
 
     @staticmethod
     def under_construction(area):
-        # Match concise, visible quiz-specific messages only, not arbitrary
-        # "建设中" labels for videos or other resources on the same page.
+        # The platform sometimes labels the mastery action simply "建设中".
+        # Require the adjacent knowledge mastery label so an unrelated resource
+        # marked "建设中" is not treated as an unavailable quiz.
         return bool(area.count() and area.evaluate(r"""root => {
-          const terms = /(?:题库|试题|题目|练习|测验|考试)/;
-          return [root, ...root.querySelectorAll('*')].some(el => {
-            const rect = el.getBoundingClientRect(), style = getComputedStyle(el);
-            if (!rect.width || !rect.height || style.visibility === 'hidden' || style.display === 'none') return false;
-            const text = (el.innerText || '').replace(/\s+/g, '');
-            return text.length <= 35 && text.includes('建设中') && terms.test(text);
-          });
+          const all = [root, ...root.querySelectorAll('*')];
+          const visible = el => {
+            const r = el.getBoundingClientRect(), s = getComputedStyle(el);
+            return !!r.width && !!r.height && s.visibility !== 'hidden' && s.display !== 'none';
+          };
+          const text = el => (el.innerText || '').replace(/\s+/g, '');
+          const quizTerms = /(?:题库|试题|题目|练习|测验|考试)/;
+          if (all.some(el => visible(el) && text(el).length <= 35 && text(el).includes('建设中') && quizTerms.test(text(el)))) return true;
+          if (all.some(el => visible(el) && el.getBoundingClientRect().height <= 70 && /^知识点(?:最高)?掌握度[:：]?\d+(?:\.\d+)?%建设中(?:[>›→»])?$/.test(text(el)))) return true;
+          const labels = all.filter(el => visible(el) && /^知识点(?:最高)?掌握度[:：]?(?:\d+(?:\.\d+)?%)?$/.test(text(el)));
+          const buttons = all.filter(el => visible(el) && /^建设中(?:[>›→»])?$/.test(text(el)));
+          return labels.some(label => buttons.some(button => {
+            const a = label.getBoundingClientRect(), b = button.getBoundingClientRect();
+            const overlap = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+            return overlap > 0 && b.left >= a.right - 12 && b.left - a.right <= 400;
+          }));
         }"""))
 
 
