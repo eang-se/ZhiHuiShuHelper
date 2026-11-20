@@ -76,6 +76,12 @@ class Retryable(Halt):
     pass
 
 
+class ManualPageSwitch(Exception):
+    """Abandon the old checkpoint after the user selects a new knowledge point."""
+    def __init__(self, page):
+        self.page = page
+
+
 class AnswerFormatError(Retryable):
     pass
 
@@ -607,6 +613,8 @@ class Limits:
         self.calls = 0
         self.control = control
         self.on_checkpoint = on_checkpoint
+        self.retry_capture = None
+        self.on_retry = None
 
     def report(self, kind: str, **values):
         if self.control:
@@ -639,6 +647,7 @@ class Limits:
         self.report('metrics', api_calls=self.calls)
 
     def retry_step(self, stage, action):
+        snapshot = self.retry_capture() if self.retry_capture else None
         while True:
             self.check()
             try:
@@ -647,21 +656,31 @@ class Limits:
                 browser_timeout = type(error).__name__ == 'TimeoutError' and type(error).__module__.startswith('playwright.')
                 if not isinstance(error, Retryable) and not browser_timeout:
                     raise
-                print(f'{stage}暂未完成：{error}')
-                if self.control:
-                    if isinstance(error, ApiLimitReached):
-                        self.deadline += self.control.wait_for_retry(stage, str(error), reason='api_limit')
+                while True:
+                    print(f'{stage}暂未完成：{error}')
+                    if self.control:
+                        if isinstance(error, ApiLimitReached):
+                            self.deadline += self.control.wait_for_retry(stage, str(error), reason='api_limit')
+                        else:
+                            self.deadline += self.control.wait_for_retry(stage, str(error))
                     else:
-                        self.deadline += self.control.wait_for_retry(stage, str(error))
-                else:
-                    start = time.monotonic()
+                        start = time.monotonic()
+                        try:
+                            decision = input('按回车从本步骤重试，输入 q 停止：').strip().lower()
+                        except EOFError:
+                            raise Halt('当前没有交互输入入口，已保留失败步骤，请在图形窗口重试。') from None
+                        if decision:
+                            raise Halt('已停止断点重试。')
+                        self.deadline += time.monotonic()-start
+                    self.check()
                     try:
-                        decision = input('按回车从本步骤重试，输入 q 停止：').strip().lower()
-                    except EOFError:
-                        raise Halt('当前没有交互输入入口，已保留失败步骤，请在图形窗口重试。') from None
-                    if decision:
-                        raise Halt('已停止断点重试。')
-                    self.deadline += time.monotonic()-start
+                        if self.on_retry:
+                            self.on_retry(snapshot)
+                    except Retryable as next_error:
+                        error = next_error
+                        continue
+                    break
+
 
 
 class DeepSeek:
@@ -1532,38 +1551,101 @@ class CourseNavigator:
 
 
 
+def retry_page_snapshot(context):
+    """Remember tab URLs before a step; do not include page or account data in logs."""
+    return {page: page.url for page in context.pages if not page.is_closed()}
+
+
+def manual_retry_page(context, cfg, current, snapshot):
+    """Select only a newly opened or navigated, fully rendered knowledge page."""
+    candidates = []
+    expected = {key: current[key] for key in ('course_id', 'class_id', 'knowledge_id')}
+    for page in context.pages:
+        if page.is_closed() or snapshot.get(page) == page.url:
+            continue
+        try:
+            ids = platform_ids(page.url)
+        except Halt:
+            continue
+        if ids == expected:
+            continue
+        ready = False
+        for frame in page.frames:
+            if cfg.get('frame_url_contains') and cfg['frame_url_contains'] not in frame.url:
+                continue
+            for key in ('question', 'result', 'review_root'):
+                selector = cfg['selectors'].get(key)
+                if not selector:
+                    continue
+                nodes = frame.locator(selector)
+                if any(nodes.nth(i).is_visible() for i in range(nodes.count())):
+                    ready = True
+                    break
+            if ready:
+                break
+        candidates.append((page, ready))
+    if len(candidates) > 1:
+        raise Retryable('检测到多个新知识点页面，请只保留要继续的答题页，再点击断点重试。')
+    if candidates:
+        if not candidates[0][1]:
+            raise Retryable('检测到新知识点，但答题或结果页面尚未加载完成；请等待后点击断点重试。')
+        raise ManualPageSwitch(candidates[0][0])
+
+
 def run_course(context, page, cfg, bank, limits, ai=None, metadata=None, navigator=None):
     meta = metadata or resolve_metadata(context, page, cfg['timeout_seconds'])
     navigator = navigator or CourseNavigator(context, page, cfg, limits)
     ai = ai or DeepSeek(cfg, limits)
     visited = set()
-    while True:
-        limits.check()
-        identity = (meta['course_id'], meta['knowledge_id'])
-        if identity in visited:
-            raise Halt('自动切换返回了已完成的知识点，已停止避免循环。')
-        visited.add(identity)
-        limits.report('metadata', **meta)
-        limits.report('phase', status='运行中', message='正在作答')
-        scope = bank.catalogue(meta)
-        print(f"自动归档：{meta['course_title']} / {meta['chapter_title']} / {meta['unit_title']} / {meta['knowledge_title']}")
-        known_score = meta.get('mastery')
-        if isinstance(known_score, (int, float)) and not isinstance(known_score, bool) and math.isfinite(known_score) and cfg['target'] <= known_score <= 100:
-            score = known_score
-            print(f"跳过：{meta['knowledge_title']}（掌握度 {score:g}%，已达标）")
-            limits.report('score', mastery=score)
-            limits.report('point_skipped', point=meta, reason='已达标')
-        else:
-            adapter = BrowserAdapter(page, cfg, limits)
-            score = Runner(adapter, bank, ai, cfg, scope, meta['knowledge_id'], limits).run()
-            limits.report('point_done', point=meta, mastery=score)
-        if not cfg.get('auto_next', True):
-            return score
-        next_meta = navigator.advance(meta)
-        if next_meta is None:
-            print('当前范围内后续知识点均已处理，停止。')
-            return score
-        meta, page = next_meta, navigator.page
+    old_capture, old_on_retry = limits.retry_capture, limits.on_retry
+    limits.retry_capture = lambda: retry_page_snapshot(context)
+    try:
+        while True:
+            iteration_snapshot = retry_page_snapshot(context)
+            limits.retry_capture = lambda: iteration_snapshot
+            limits.on_retry = lambda snapshot: manual_retry_page(context, cfg, meta, snapshot or {})
+            try:
+                limits.check()
+                identity = (meta['course_id'], meta['knowledge_id'])
+                if identity in visited:
+                    raise Halt('自动切换返回了已完成的知识点，已停止避免循环。')
+                visited.add(identity)
+                limits.report('metadata', **meta)
+                limits.report('phase', status='运行中', message='正在作答')
+                scope = bank.catalogue(meta)
+                print(f"自动归档：{meta['course_title']} / {meta['chapter_title']} / {meta['unit_title']} / {meta['knowledge_title']}")
+                known_score = meta.get('mastery')
+                if isinstance(known_score, (int, float)) and not isinstance(known_score, bool) and math.isfinite(known_score) and cfg['target'] <= known_score <= 100:
+                    score = known_score
+                    print(f"跳过：{meta['knowledge_title']}（掌握度 {score:g}%，已达标）")
+                    limits.report('score', mastery=score)
+                    limits.report('point_skipped', point=meta, reason='已达标')
+                else:
+                    adapter = BrowserAdapter(page, cfg, limits)
+                    score = Runner(adapter, bank, ai, cfg, scope, meta['knowledge_id'], limits).run()
+                    limits.report('point_done', point=meta, mastery=score)
+                if not cfg.get('auto_next', True):
+                    return score
+                next_meta = navigator.advance(meta)
+                if next_meta is None:
+                    print('当前范围内后续知识点均已处理，停止。')
+                    return score
+                meta, page = next_meta, navigator.page
+            except ManualPageSwitch as change:
+                limits.report('point_interrupted', point=meta)
+                page = change.page
+                limits.on_retry = None
+                def load_manual_metadata():
+                    try:
+                        return resolve_metadata(context, page, cfg['timeout_seconds'])
+                    except Exception as error:
+                        raise Retryable('新知识点信息暂未读全，请检查页面后重试。') from error
+                meta = limits.retry_step('读取新知识点信息', load_manual_metadata)
+                navigator.page = page
+                visited.clear()
+                print(f"已切换到手动打开的知识点：{meta['chapter_title']} / {meta['knowledge_title']}；原断点已结束，已保存的记录保留。")
+    finally:
+        limits.retry_capture, limits.on_retry = old_capture, old_on_retry
 
 
 def main(argv=None):

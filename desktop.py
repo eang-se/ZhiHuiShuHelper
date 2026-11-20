@@ -491,6 +491,8 @@ class App:
         elif kind == 'api_limit_changed':
             self.counts['api_calls'] = event['api_calls']
             self.append_log(f"当前运行已应用总请求上限 {event['max_api_calls']}，已用 {event['api_calls']} 次。")
+        elif kind == 'point_interrupted':
+            self.point_row(event['point'], '已手动切换', event['point'].get('mastery'))
         elif kind == 'point_done':
             key = event['point']['knowledge_id']
             self.completed_ids.add(key)
